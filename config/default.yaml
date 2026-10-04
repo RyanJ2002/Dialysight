@@ -1,0 +1,64 @@
+# DialySight 預設設定
+#
+# 所有閾值都在這裡，不要寫死在程式碼裡。
+# 對照實驗就是跑兩份不同的 config。
+
+inference:
+  backend: ultralytics      # ultralytics | replay | hailo（10/26 後）
+  model: yolov8s-pose.pt
+  device: cpu               # cpu | cuda | mps
+  imgsz: 640
+  conf: 0.25
+  # backend: replay 時使用
+  # keypoints_json: data/clips/clip_03.json
+
+filter:
+  min_confidence: 0.5       # TODO: 拍完素材後用信心值分布調整
+  min_visibility_ratio: 0.4
+
+features:
+  wrist_side: right         # 穿刺側
+  enabled:
+    - arm_displacement
+    - torso_angle
+  # 第二階段：bed_occupancy, keypoint_visibility
+  # Stage II：arm_depth_delta（需要 scdepthv3）
+
+baseline:
+  mode: auto                # auto | manual（待決事項 #4）
+  n_frames: 300             # 10 FPS 下約 30 秒
+  min_valid_frames: 50
+
+smooth:
+  default:
+    method: median
+    window: 7
+  per_feature:
+    arm_displacement:
+      method: median
+      window: 7
+    arm_displacement_velocity:
+      method: moving_average
+      window: 5
+
+windows:
+  short: 5.0
+  medium: 60.0
+  long: 900.0
+
+state_machine:
+  enter_threshold: 0.15     # TODO: 拍完素材後實測調整
+  exit_threshold: 0.10      # 必須小於 enter（遲滯）
+  t_enter: 1.0
+  t_confirm: 5.0
+  t_exit: 3.0
+  cooldown: 30.0
+
+visualize:
+  width: 1280
+  height: 720
+  video_w: 720
+  curve_h: 440
+  event_h: 160
+  curve_span_s: 90.0
+  bed_label: "Bed 07"

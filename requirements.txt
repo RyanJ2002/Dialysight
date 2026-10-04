@@ -1,0 +1,14 @@
+# 核心
+numpy>=1.24
+opencv-python>=4.8
+PyYAML>=6.0
+
+# 開發期推論後端
+# ⚠️ AGPL-3.0，授權問題待確認（見 README「授權」一節）
+ultralytics>=8.1
+
+# 繪圖與實驗報告
+matplotlib>=3.7
+
+# Stage II（10/26 後，隨 UGen300 取得）
+# hailo-platform    # HailoRT Python API

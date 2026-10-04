@@ -1,0 +1,47 @@
+# 對照組設定：單一閾值，無遲滯、無確認時間、無冷卻。
+#
+# 這是模擬官方 demo 作法的對照組。
+# 偽陽性對照實驗就是跑 default.yaml 與這份，比較告警次數。
+
+inference:
+  backend: ultralytics
+  model: yolov8s-pose.pt
+  device: cpu
+  imgsz: 640
+  conf: 0.25
+
+filter:
+  min_confidence: 0.5
+  min_visibility_ratio: 0.4
+
+features:
+  wrist_side: right
+  enabled:
+    - arm_displacement
+    - torso_angle
+
+baseline:
+  mode: auto
+  n_frames: 300
+  min_valid_frames: 50
+
+smooth:
+  default:
+    method: none            # 對照組不做平滑
+    window: 1
+
+windows:
+  short: 5.0
+  medium: 60.0
+  long: 900.0
+
+state_machine:
+  enter_threshold: 0.15     # 與實驗組相同，確保公平比較
+  exit_threshold: 0.10
+  t_enter: 0.0              # 不等待
+  t_confirm: 0.0            # 不確認
+  t_exit: 0.0
+  cooldown: 0.0             # 不冷卻
+
+visualize:
+  bed_label: "Bed 07 (baseline)"

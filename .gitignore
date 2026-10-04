@@ -1,0 +1,27 @@
+# 影片素材不進版控（檔案大，且含人像）
+data/clips/*
+!data/clips/.gitkeep
+
+# 但關鍵點 JSON 可以進（純數字，檔案小，方便重現）
+!data/clips/*.json
+
+# 模型權重
+*.pt
+*.hef
+*.onnx
+
+# 實驗輸出
+results/*
+!results/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# 系統
+.DS_Store
+Thumbs.db
