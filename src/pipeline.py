@@ -34,6 +34,7 @@ class FrameResult:
     state: State
     new_event: Optional[Event] = None
     baseline_ready: bool = True
+    baseline_progress: tuple[int, int] = (0, 0)   # (已收集, 需要) 給 UI 顯示進度
     window_stats: dict = field(default_factory=dict)
 
 
@@ -104,6 +105,7 @@ class Pipeline:
             return FrameResult(
                 obs=obs, features=feats, deviations={},
                 state=State.NORMAL, baseline_ready=False,
+                baseline_progress=(self.baseline._count, self.baseline.cfg.n_frames),
             )
 
         # 取絕對值 —— 往哪個方向偏離都算異常

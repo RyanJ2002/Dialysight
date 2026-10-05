@@ -72,6 +72,7 @@ def main() -> None:
             canvas = renderer.render(
                 result.obs, result.deviations, result.state,
                 result.new_event, result.obs.timestamp,
+                baseline_progress=result.baseline_progress,
             )
             if writer:
                 writer.write(canvas)

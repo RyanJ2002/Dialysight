@@ -137,6 +137,7 @@ class DemoRenderer:
         new_event: Optional[Event] = None,
         timestamp: Optional[float] = None,
         color_cfg=None,
+        baseline_progress: Optional[tuple[int, int]] = None,
     ) -> np.ndarray:
         """合成單一影格。
 
@@ -163,11 +164,50 @@ class DemoRenderer:
         canvas = np.full((self.L.height, self.L.width, 3), COLORS["bg"], np.uint8)
 
         self._draw_video(canvas, obs, state, color_cfg)
-        self._draw_curve(canvas, ts, state)
-        self._draw_state_badge(canvas, state, value)
-        self._draw_events(canvas)
 
+        building = (baseline_progress is not None
+                    and baseline_progress[1] > 0
+                    and baseline_progress[0] < baseline_progress[1])
+        if building:
+            # ★ 基準建立期：右側顯示進度，不要留一片空白
+            self._draw_baseline_progress(canvas, *baseline_progress)
+        else:
+            self._draw_curve(canvas, ts, state)
+            self._draw_state_badge(canvas, state, value)
+
+        self._draw_events(canvas)
         return canvas
+
+    def _draw_baseline_progress(self, canvas: np.ndarray, done: int, need: int) -> None:
+        """基準線建立中的提示畫面。
+
+        沒有這個的話右側會是一片空白，觀眾（和評審）不知道系統在幹嘛。
+        """
+        x0 = self.L.video_w + 16
+        x1 = self.L.width - 16
+        y0 = 56
+        y1 = self.L.height - self.L.event_h - 8
+
+        cv2.rectangle(canvas, (x0, y0), (x1, y1), COLORS["panel"], -1)
+
+        cy = (y0 + y1) // 2
+        self._text(canvas, "Establishing baseline", (x0 + 28, cy - 46),
+                   COLORS["text"], scale=0.8, thickness=2)
+        self._text(canvas, "per-session reference for this patient",
+                   (x0 + 28, cy - 20), COLORS["text_dim"], scale=0.5)
+
+        # 進度條
+        bw = (x1 - x0) - 56
+        bx, by = x0 + 28, cy + 8
+        cv2.rectangle(canvas, (bx, by), (bx + bw, by + 14), COLORS["grid"], -1)
+        frac = min(1.0, done / max(need, 1))
+        cv2.rectangle(canvas, (bx, by), (bx + int(bw * frac), by + 14),
+                      COLORS[State.WATCHING], -1)
+
+        self._text(canvas, f"{done} / {need} frames", (bx, by + 40),
+                   COLORS["text"], scale=0.6)
+        self._text(canvas, f"{frac * 100:.0f}%", (x1 - 76, by + 40),
+                   COLORS[State.WATCHING], scale=0.6)
 
     # -- 左側：影片 + 骨架 ----------------------------------------------
 
@@ -189,8 +229,17 @@ class DemoRenderer:
             if overlaid is not None:
                 src = overlaid
 
-        frame = cv2.resize(src, (w, h))
-        self._draw_skeleton(frame, obs)
+        # ★ 保持長寬比，置中貼上。直接 resize 會把直立構圖拉扁
+        sh, sw = src.shape[:2]
+        scale = min(w / sw, h / sh)
+        nw, nh = max(1, int(sw * scale)), max(1, int(sh * scale))
+        fitted = cv2.resize(src, (nw, nh))
+
+        frame = np.full((h, w, 3), COLORS["bg"], np.uint8)
+        ox, oy = (w - nw) // 2, (h - nh) // 2
+        frame[oy:oy + nh, ox:ox + nw] = fitted
+
+        self._draw_skeleton(frame, obs, (ox, oy, nw, nh))
 
         # 狀態色的外框，讓觀眾一眼看到當前狀態
         cv2.rectangle(frame, (0, 0), (w - 1, h - 1), COLORS[state], 4)
@@ -200,15 +249,27 @@ class DemoRenderer:
         self._text(canvas, f"t = {obs.timestamp:6.1f}s", (18, h - 18),
                    COLORS["text_dim"], scale=0.55)
 
-    def _draw_skeleton(self, frame: np.ndarray, obs: FrameObservation) -> None:
-        h, w = frame.shape[:2]
+    def _draw_skeleton(self, frame: np.ndarray, obs: FrameObservation,
+                       box: Optional[tuple[int, int, int, int]] = None) -> None:
+        """box = (ox, oy, nw, nh)：影片在畫布上的實際位置與尺寸。
+
+        正規化座標要映射到這個範圍，而不是整張畫布 ——
+        否則保持長寬比之後骨架會偏移。
+        """
+        if box is None:
+            h, w = frame.shape[:2]
+            ox = oy = 0
+        else:
+            ox, oy, w, h = box
 
         def px(kp) -> tuple[int, int]:
-            return int(kp.x * w), int(kp.y * h)
+            return int(ox + kp.x * w), int(oy + kp.y * h)
 
         for a, b in SKELETON:
             ka, kb = obs.keypoints[int(a)], obs.keypoints[int(b)]
             if ka.is_valid and kb.is_valid:
+                # 先畫深色外框再畫亮色線，確保在明亮背景上也看得清楚
+                cv2.line(frame, px(ka), px(kb), (20, 20, 24), 5, cv2.LINE_AA)
                 cv2.line(frame, px(ka), px(kb), COLORS["skeleton"], 2, cv2.LINE_AA)
 
         for kp in obs.keypoints:
@@ -310,6 +371,11 @@ class DemoRenderer:
         cv2.rectangle(canvas, (0, y0), (self.L.width, self.L.height),
                       COLORS["panel"], -1)
         self._text(canvas, "EVENTS", (18, y0 + 26), COLORS["text_dim"], scale=0.5)
+
+        if not self._event_log:
+            self._text(canvas, "no events yet", (18, y0 + 56),
+                       COLORS["text_dim"], scale=0.55)
+            return
 
         for i, line in enumerate(self._event_log):
             self._text(canvas, line, (18, y0 + 54 + i * 26),
