@@ -63,6 +63,8 @@ COLORS = {
     "keypoint":  (120, 200, 255),
     "curve":     (120, 200, 255),
     "threshold": (90, 90, 180),
+    "redness":   (80, 80, 230),      # 前臂 ROI：紅
+    "reference": (230, 170, 80),     # 上臂參考區：藍
     State.NORMAL:   (120, 200, 120),
     State.WATCHING: (60, 190, 240),
     State.ALERT:    (60, 60, 240),
@@ -87,6 +89,10 @@ class LayoutConfig:
     event_h: int = 160          # 下方事件列高度
     curve_span_s: float = 90.0  # 曲線顯示最近幾秒
     bed_label: str = "Bed 07"
+
+    # 滲血偵測的視覺化（config 的 color.enabled 開啟時才有意義）
+    show_color_panel: bool = False   # 右側多一條 roi_redness 曲線
+    show_roi_overlay: bool = False   # 影片上畫出前臂 ROI 與上臂參考區
 
 
 class DemoRenderer:
@@ -114,6 +120,11 @@ class DemoRenderer:
         self._history: deque[tuple[float, float]] = deque(
             maxlen=int(self.L.curve_span_s * 60)
         )
+        # 滲血訊號的歷史（第二條曲線）
+        self._redness: deque[tuple[float, float]] = deque(
+            maxlen=int(self.L.curve_span_s * 60)
+        )
+        self._monotonic: float = float("nan")
         self._event_log: deque[str] = deque(maxlen=4)
 
     # ------------------------------------------------------------------
@@ -125,20 +136,33 @@ class DemoRenderer:
         state: State,
         new_event: Optional[Event] = None,
         timestamp: Optional[float] = None,
+        color_cfg=None,
     ) -> np.ndarray:
-        """合成單一影格。"""
+        """合成單一影格。
+
+        Args:
+            color_cfg: ColorConfig。傳入且 show_roi_overlay 為 True 時，
+                       會在影片上畫出前臂 ROI（紅）與上臂參考區（藍）。
+        """
         ts = timestamp if timestamp is not None else obs.timestamp
 
         value = features.get(self.primary, float("nan"))
         if value == value:                       # 非 NaN
             self._history.append((ts, value))
 
+        red = features.get("roi_redness", float("nan"))
+        if red == red:
+            self._redness.append((ts, red))
+        mono = features.get("redness_monotonic", float("nan"))
+        if mono == mono:
+            self._monotonic = mono
+
         if new_event is not None:
             self._event_log.append(self._format_event(new_event))
 
         canvas = np.full((self.L.height, self.L.width, 3), COLORS["bg"], np.uint8)
 
-        self._draw_video(canvas, obs, state)
+        self._draw_video(canvas, obs, state, color_cfg)
         self._draw_curve(canvas, ts, state)
         self._draw_state_badge(canvas, state, value)
         self._draw_events(canvas)
@@ -147,7 +171,8 @@ class DemoRenderer:
 
     # -- 左側：影片 + 骨架 ----------------------------------------------
 
-    def _draw_video(self, canvas: np.ndarray, obs: FrameObservation, state: State) -> None:
+    def _draw_video(self, canvas: np.ndarray, obs: FrameObservation,
+                    state: State, color_cfg=None) -> None:
         h = self.L.height - self.L.event_h
         w = self.L.video_w
 
@@ -156,7 +181,15 @@ class DemoRenderer:
             self._text(canvas, "no frame", (20, 40), COLORS["text_dim"])
             return
 
-        frame = cv2.resize(obs.raw_frame, (w, h))
+        src = obs.raw_frame
+        # 滲血偵測的 ROI 疊圖：前臂紅框、上臂參考區藍框
+        if self.L.show_roi_overlay and color_cfg is not None:
+            from .temporal.color import roi_overlay
+            overlaid = roi_overlay(obs, color_cfg)
+            if overlaid is not None:
+                src = overlaid
+
+        frame = cv2.resize(src, (w, h))
         self._draw_skeleton(frame, obs)
 
         # 狀態色的外框，讓觀眾一眼看到當前狀態
@@ -190,19 +223,43 @@ class DemoRenderer:
     # -- 右側：特徵曲線 --------------------------------------------------
 
     def _draw_curve(self, canvas: np.ndarray, now: float, state: State) -> None:
-        x0 = self.L.video_w + 16
-        y0 = 56
-        x1 = self.L.width - 16
-        y1 = y0 + self.L.curve_h
-
-        cv2.rectangle(canvas, (x0, y0), (x1, y1), COLORS["panel"], -1)
-        self._text(canvas, self.primary, (x0, y0 - 14), COLORS["text"], scale=0.6)
-
-        if len(self._history) < 2:
+        """主訊號曲線。開啟 show_color_panel 時上半畫主訊號、下半畫滲血訊號。"""
+        if self.L.show_color_panel:
+            gap = 14
+            h_each = (self.L.curve_h - gap) // 2
+            self._draw_one_curve(canvas, now, state, self._history, 56, h_each,
+                                 self.primary, COLORS["curve"], self.thresholds)
+            self._draw_one_curve(canvas, now, state, self._redness,
+                                 56 + h_each + gap, h_each,
+                                 "roi_redness", COLORS["redness"], None,
+                                 badge=self._monotonic)
             return
 
-        # Y 軸範圍：固定下限 0，上限取資料最大值與 enter 閾值的較大者
-        vmax = max(max(v for _, v in self._history), self.thresholds["enter"]) * 1.25
+        self._draw_one_curve(canvas, now, state, self._history, 56,
+                             self.L.curve_h, self.primary,
+                             COLORS["curve"], self.thresholds)
+
+    def _draw_one_curve(self, canvas, now, state, history, top, height,
+                        label, color, thresholds, badge=None) -> None:
+        x0 = self.L.video_w + 16
+        y0 = top
+        x1 = self.L.width - 16
+        y1 = y0 + height
+
+        cv2.rectangle(canvas, (x0, y0), (x1, y1), COLORS["panel"], -1)
+        self._text(canvas, label, (x0, y0 - 14), COLORS["text"], scale=0.6)
+
+        # 單調性分數：滲血曲線才有。>0.8 代表「持續累積」而非「跳變」
+        if badge is not None and badge == badge:
+            tag = f"monotonic {badge:.2f}"
+            col = COLORS["redness"] if badge > 0.8 else COLORS["text_dim"]
+            self._text(canvas, tag, (x1 - 150, y0 - 14), col, scale=0.5)
+
+        if len(history) < 2:
+            return
+
+        floor = thresholds["enter"] if thresholds else 1e-6
+        vmax = max(max(v for _, v in history), floor) * 1.25
         vmax = max(vmax, 1e-6)
 
         def to_px(t: float, v: float) -> tuple[int, int]:
@@ -213,26 +270,29 @@ class DemoRenderer:
                 int(y1 - min(v / vmax, 1.0) * (y1 - y0)),
             )
 
-        # 閾值線
-        for name, color in (("enter", COLORS["threshold"]), ("exit", COLORS["grid"])):
-            yv = to_px(now, self.thresholds[name])[1]
-            cv2.line(canvas, (x0, yv), (x1, yv), color, 1, cv2.LINE_AA)
-            self._text(canvas, name, (x1 - 54, yv - 6), color, scale=0.42)
+        # 閾值線（滲血曲線沒有閾值，跳過）
+        if thresholds:
+            for name, c in (("enter", COLORS["threshold"]), ("exit", COLORS["grid"])):
+                yv = to_px(now, thresholds[name])[1]
+                cv2.line(canvas, (x0, yv), (x1, yv), c, 1, cv2.LINE_AA)
+                self._text(canvas, name, (x1 - 54, yv - 6), c, scale=0.42)
 
         # 曲線本體
-        pts = [to_px(t, v) for t, v in self._history if t >= now - self.L.curve_span_s]
+        pts = [to_px(t, v) for t, v in history if t >= now - self.L.curve_span_s]
         if len(pts) >= 2:
             cv2.polylines(canvas, [np.array(pts, np.int32)], False,
-                          COLORS["curve"], 2, cv2.LINE_AA)
-            cv2.circle(canvas, pts[-1], 5, COLORS[state], -1, cv2.LINE_AA)
+                          color, 2, cv2.LINE_AA)
+            cv2.circle(canvas, pts[-1], 5,
+                       COLORS[state] if thresholds else color, -1, cv2.LINE_AA)
 
     # -- 右下：狀態徽章 --------------------------------------------------
 
     def _draw_state_badge(self, canvas: np.ndarray, state: State, value: float) -> None:
+        # 從事件列往上貼齊，避免 curve_h 改動時溢出
         x0 = self.L.video_w + 16
-        y0 = 56 + self.L.curve_h + 20
         x1 = self.L.width - 16
-        y1 = y0 + 64
+        y1 = self.L.height - self.L.event_h - 8
+        y0 = y1 - 64
 
         cv2.rectangle(canvas, (x0, y0), (x1, y1), COLORS["panel"], -1)
         cv2.rectangle(canvas, (x0, y0), (x0 + 8, y1), COLORS[state], -1)
