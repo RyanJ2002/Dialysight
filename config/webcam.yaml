@@ -1,0 +1,80 @@
+# 用網路攝影機快速試跑的設定。
+#
+# ★ 這份是「現在就想看它動」用的，不是正式設定。
+#   跟 default.yaml 的差別都是為了降低門檻：
+#     - 基準線從 300 格縮到 50 格（5 秒就建立好，不用等 30 秒）
+#     - 關掉躺姿判定（你坐在電腦前不是躺著）
+#     - ROI 放到全畫面
+#     - 閾值調低（手部小幅移動就會觸發，看得到狀態切換）
+#
+# 用法：
+#   python scripts/run_demo.py --video 0 --config config/webcam.yaml --show
+#   （0 是預設攝影機，按 q 離開）
+#
+# 看什麼：
+#   前 5 秒建立基準 → 之後把右手慢慢往外移 → 曲線上升
+#   → 狀態 NORMAL → WATCHING → ALERT
+
+inference:
+  backend: ultralytics
+  model: yolov8n-pose.pt     # n 比 s 小，筆電 CPU 跑得動
+  device: cpu
+  imgsz: 640
+  conf: 0.25
+
+subject:
+  roi:                       # 全畫面，不篩位置
+    x_min: 0.0
+    y_min: 0.0
+    x_max: 1.0
+    y_max: 1.0
+  require_lying: false       # ★ 關掉躺姿判定，坐著也認得出來
+  max_torso_angle_deg: 90.0
+  min_torso_keypoints: 2
+
+filter:
+  min_confidence: 0.4
+
+features:
+  wrist_side: right
+  enabled:
+    - arm_displacement
+    - torso_angle
+
+baseline:
+  mode: auto
+  n_frames: 50               # ★ 約 5 秒就建立好
+  min_valid_frames: 20
+
+smooth:
+  default:
+    method: median
+    window: 5
+
+windows:
+  short: 3.0
+  medium: 20.0
+  long: 120.0
+
+state_machine:
+  enter_threshold: 0.06      # ★ 調低，小動作就看得到反應
+  exit_threshold: 0.04
+  t_enter: 0.5
+  t_confirm: 2.0
+  t_exit: 1.5
+  cooldown: 5.0
+
+sink:
+  bed_id: "Webcam"
+  jsonl: results/events_webcam.jsonl
+
+visualize:
+  width: 1280
+  height: 720
+  video_w: 720
+  curve_h: 440
+  event_h: 160
+  curve_span_s: 60.0
+  bed_label: "Webcam test"
+  show_color_panel: false
+  show_roi_overlay: false

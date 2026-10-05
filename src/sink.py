@@ -81,23 +81,51 @@ class PayloadTooLarge(ValueError):
     pass
 
 
+# payload 的值只允許這些型別。任何巢狀結構都視為可疑。
+_SCALAR = (str, int, float, bool, type(None))
+MAX_FLAT_LIST = 8
+
+
 def validate_payload(payload: dict) -> int:
     """確認 payload 沒有夾帶不該送的東西。
 
-    這個檢查是刻意的 —— 它讓「影像不出床邊」變成程式碼強制的規則，
-    而不是靠開發者自律。
+    ★ 這個檢查是刻意的 —— 它讓「影像不出床邊」變成**程式碼強制的規則**，
+      而不是靠開發者自律。有人不小心把關鍵點座標塞進來，程式會直接拋例外。
+
+    三道關卡：
+      1. 值只能是純量（字串、數字、布林、None）
+      2. 巢狀結構（list of list / dict）一律拒絕 —— 那是座標或影像的形狀
+      3. 扁平陣列長度上限 8，且總大小上限 1 KB
     """
+    for key, value in payload.items():
+        if isinstance(value, (bytes, bytearray)):
+            raise PayloadTooLarge(f"欄位 {key} 是二進位資料，不允許送出")
+
+        if isinstance(value, dict):
+            raise PayloadTooLarge(
+                f"欄位 {key} 是巢狀物件。payload 只接受扁平的純量欄位")
+
+        if isinstance(value, (list, tuple)):
+            if len(value) > MAX_FLAT_LIST:
+                raise PayloadTooLarge(
+                    f"欄位 {key} 是長度 {len(value)} 的陣列（上限 {MAX_FLAT_LIST}），"
+                    "疑似座標或序列資料")
+            for item in value:
+                if not isinstance(item, _SCALAR):
+                    raise PayloadTooLarge(
+                        f"欄位 {key} 含巢狀元素 {type(item).__name__}，"
+                        "疑似關鍵點座標。影像相關資料不得離開床邊")
+            continue
+
+        if not isinstance(value, _SCALAR):
+            raise PayloadTooLarge(
+                f"欄位 {key} 的型別 {type(value).__name__} 不允許送出")
+
     size = payload_size(payload)
     if size > MAX_PAYLOAD_BYTES:
         raise PayloadTooLarge(
             f"payload {size} bytes 超過上限 {MAX_PAYLOAD_BYTES}。"
-            "檢查是否誤把影像或關鍵點陣列塞進去了。"
-        )
-    for key, value in payload.items():
-        if isinstance(value, (bytes, bytearray)):
-            raise PayloadTooLarge(f"欄位 {key} 是二進位資料，不允許送出")
-        if isinstance(value, list) and len(value) > 32:
-            raise PayloadTooLarge(f"欄位 {key} 是長度 {len(value)} 的陣列，疑似座標資料")
+            "檢查是否誤把影像或關鍵點陣列塞進去了。")
     return size
 
 
