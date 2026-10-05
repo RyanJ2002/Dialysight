@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<!--
+  護理站多床總覽。
+
+  ★ 這一頁上沒有任何影像。全部資料都來自床邊送過來的文字 payload。
+    這就是「影像不出床邊」在產品面的呈現。
+
+  由 scripts/nurse_station.py 提供，每 2 秒輪詢 /api/state。
+  只用原生 JS，不依賴任何框架。
+-->
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DialySight — 護理站總覽</title>
+<style>
+  :root{
+    --bg:#16181d; --panel:#1f232b; --line:#2d323c;
+    --text:#e8eaed; --dim:#9aa0ab;
+    --normal:#4ec07a; --watching:#e0a13c; --alert:#e05858; --offline:#5a606b;
+    box-sizing:border-box;
+    padding-top:env(safe-area-inset-top,0px);
+    padding-bottom:env(safe-area-inset-bottom,0px);
+  }
+  *,*::before,*::after{box-sizing:inherit}
+  html{scroll-padding-top:env(safe-area-inset-top,0px)}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.5 -apple-system,"Noto Sans TC","Segoe UI",system-ui,sans-serif;
+  }
+  header{
+    display:flex; align-items:baseline; gap:16px; flex-wrap:wrap;
+    padding:16px 20px; border-bottom:1px solid var(--line);
+    position:sticky; top:env(safe-area-inset-top,0px); background:var(--bg); z-index:5;
+  }
+  h1{font-size:17px; margin:0; letter-spacing:.3px}
+  .sub{color:var(--dim); font-size:12px}
+  .spacer{flex:1}
+  .pill{
+    background:var(--panel); border:1px solid var(--line);
+    padding:4px 10px; border-radius:999px; font-size:12px; color:var(--dim);
+  }
+  .pill b{color:var(--text); font-weight:600}
+
+  main{padding:20px; max-width:1400px; margin:0 auto}
+  .grid{
+    display:grid; gap:12px;
+    grid-template-columns:repeat(auto-fill,minmax(230px,1fr));
+  }
+  .bed{
+    background:var(--panel); border:1px solid var(--line); border-left-width:4px;
+    border-radius:8px; padding:12px 14px; min-height:118px;
+  }
+  .bed.normal{border-left-color:var(--normal)}
+  .bed.watching{border-left-color:var(--watching)}
+  .bed.alert{border-left-color:var(--alert)}
+  .bed.cooldown,.bed.unknown{border-left-color:var(--dim)}
+  .bed.offline{border-left-color:var(--offline); opacity:.5}
+
+  .bed-head{display:flex; align-items:center; justify-content:space-between; gap:8px}
+  .bed-id{font-size:16px; font-weight:600}
+  .state{
+    font-size:11px; letter-spacing:.6px; text-transform:uppercase;
+    padding:2px 8px; border-radius:4px; background:#00000040;
+  }
+  .state.normal{color:var(--normal)} .state.watching{color:var(--watching)}
+  .state.alert{color:var(--alert); background:#e0585822}
+  .state.cooldown,.state.unknown,.state.offline{color:var(--dim)}
+
+  .rows{margin-top:10px; display:grid; gap:3px}
+  .row{display:flex; justify-content:space-between; font-size:12px; color:var(--dim)}
+  .row b{color:var(--text); font-weight:500; font-variant-numeric:tabular-nums}
+  .warn{color:var(--watching)}
+
+  .meter{height:3px; background:#00000050; border-radius:2px; margin-top:8px; overflow:hidden}
+  .meter i{display:block; height:100%; background:var(--normal); transition:width .4s}
+
+  section.feed{margin-top:26px}
+  h2{font-size:13px; color:var(--dim); font-weight:600; margin:0 0 10px;
+     letter-spacing:.5px; text-transform:uppercase}
+  table{width:100%; border-collapse:collapse; font-size:13px}
+  th,td{text-align:left; padding:7px 10px; border-bottom:1px solid var(--line)}
+  th{color:var(--dim); font-weight:500; font-size:11px; letter-spacing:.5px;
+     text-transform:uppercase}
+  td{font-variant-numeric:tabular-nums}
+  tr.slow td:first-child{border-left:3px solid var(--watching)}
+  tr.fast td:first-child{border-left:3px solid var(--alert)}
+  .empty{color:var(--dim); padding:24px; text-align:center}
+
+  .note{
+    margin-top:24px; padding:12px 14px; border:1px solid var(--line);
+    border-radius:8px; color:var(--dim); font-size:12px; background:#00000020;
+  }
+  .note b{color:var(--text)}
+  @media (max-width:640px){ main{padding:12px} header{padding:12px} }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>DialySight</h1>
+  <span class="sub">護理站總覽</span>
+  <span class="spacer"></span>
+  <span class="pill">線上 <b id="n-online">—</b> 床</span>
+  <span class="pill">今日事件 <b id="n-events">—</b></span>
+  <span class="pill">網路流量 <b id="n-traffic">—</b></span>
+  <span class="pill" id="clock">—</span>
+</header>
+
+<main>
+  <div class="grid" id="grid"></div>
+
+  <section class="feed">
+    <h2>最近事件</h2>
+    <table>
+      <thead>
+        <tr><th>時間</th><th>床位</th><th>事件</th><th>通道</th><th>持續</th><th>峰值</th></tr>
+      </thead>
+      <tbody id="events"><tr><td colspan="6" class="empty">尚無事件</td></tr></tbody>
+    </table>
+  </section>
+
+  <div class="note">
+    <b>這一頁沒有任何影像。</b>
+    所有資料都來自床邊送過來的文字 payload（每筆約 180 bytes）。
+    影像在床邊處理完就不再離開 —— 院內網路上不存在病患影像串流。
+    <span id="traffic-detail"></span>
+  </div>
+</main>
+
+<script>
+const FEATURE_LABEL = {
+  arm_displacement: "上肢姿態異常",
+  torso_angle:      "軀幹角度變化",
+  arm_depth_delta:  "深度方向位移",
+  bed_occupancy:    "離床偵測",
+  roi_redness:      "穿刺處滲血疑慮",
+};
+const STATE_LABEL = {
+  normal:"NORMAL", watching:"WATCHING", alert:"ALERT",
+  cooldown:"COOLDOWN", unknown:"—",
+};
+
+const fmtTime = iso => {
+  if(!iso) return "—";
+  try { return new Date(iso).toLocaleTimeString("zh-TW",{hour12:false}); }
+  catch { return iso; }
+};
+const fmtBytes = n => {
+  if(n == null) return "—";
+  if(n < 1024) return n + " B";
+  if(n < 1048576) return (n/1024).toFixed(1) + " KB";
+  return (n/1048576).toFixed(2) + " MB";
+};
+
+function bedCard(b){
+  const state = b.online ? (b.state || "unknown") : "offline";
+  const cls   = b.online ? (b.state || "unknown") : "offline";
+  const vis   = b.visibility == null ? null : Math.round(b.visibility * 100);
+
+  const warnBaseline = b.online && b.baseline_ready === false;
+  const warnSubject  = b.online && b.subject_found === false;
+
+  return `
+  <div class="bed ${cls}">
+    <div class="bed-head">
+      <span class="bed-id">${b.bed}</span>
+      <span class="state ${cls}">${b.online ? (STATE_LABEL[state]||state) : "OFFLINE"}</span>
+    </div>
+    <div class="rows">
+      <div class="row"><span>事件數</span><b>${b.events ?? 0}</b></div>
+      <div class="row"><span>偏離量</span><b>${b.value == null ? "—" : b.value.toFixed(4)}</b></div>
+      <div class="row ${warnSubject ? "warn" : ""}">
+        <span>病人辨識</span><b>${b.online ? (b.subject_found === false ? "未偵測" : "正常") : "—"}</b>
+      </div>
+      ${warnBaseline ? '<div class="row warn"><span>基準線</span><b>建立中</b></div>' : ""}
+      ${!b.online ? `<div class="row"><span>最後回報</span><b>${b.age_s}s 前</b></div>` : ""}
+    </div>
+    ${vis == null ? "" : `<div class="meter"><i style="width:${vis}%"></i></div>`}
+  </div>`;
+}
+
+function eventRow(e){
+  return `<tr class="${e.channel || ""}">
+    <td>${fmtTime(e.ts)}</td>
+    <td>${e.bed || "—"}</td>
+    <td>${FEATURE_LABEL[e.feature] || e.feature || "—"}</td>
+    <td>${e.channel === "fast" ? "快通道" : "慢通道"}</td>
+    <td>${e.duration == null ? "—" : e.duration + " s"}</td>
+    <td>${e.peak == null ? "—" : e.peak}</td>
+  </tr>`;
+}
+
+async function refresh(){
+  try{
+    const [state, events, stats] = await Promise.all([
+      fetch("/api/state").then(r => r.json()),
+      fetch("/api/events").then(r => r.json()),
+      fetch("/api/stats").then(r => r.json()),
+    ]);
+
+    const beds = state.beds || [];
+    document.getElementById("grid").innerHTML =
+      beds.length ? beds.map(bedCard).join("")
+                  : '<div class="empty">尚未有床邊主機連線</div>';
+
+    document.getElementById("n-online").textContent =
+      beds.filter(b => b.online).length;
+    document.getElementById("n-events").textContent = stats.events ?? 0;
+    document.getElementById("n-traffic").textContent =
+      (stats.kbps ?? 0).toFixed(3) + " kbps";
+    document.getElementById("clock").textContent = fmtTime(state.server_time);
+
+    const tb = document.getElementById("events");
+    const real = (events || []).filter(e => e.type !== "status");
+    tb.innerHTML = real.length ? real.map(eventRow).join("")
+                              : '<tr><td colspan="6" class="empty">尚無事件</td></tr>';
+
+    document.getElementById("traffic-detail").innerHTML =
+      `目前累計 <b>${fmtBytes(stats.bytes_total)}</b>，`
+      + `平均每筆 <b>${stats.bytes_mean_per_message} bytes</b>，`
+      + `換算 <b>${(stats.kbps ?? 0).toFixed(3)} kbps</b>。`
+      + `對照：單路 1080p 串流約 4 Mbps。`;
+  }catch(e){
+    document.getElementById("clock").textContent = "連線中斷";
+  }
+}
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
