@@ -22,8 +22,9 @@ features:
 
 baseline:
   mode: auto
-  n_frames: 300
+  duration_s: 30.0          # 與實驗組相同，確保公平比較
   min_valid_frames: 50
+  max_duration_s: 120.0
 
 smooth:
   default:
@@ -42,6 +43,18 @@ state_machine:
   t_confirm: 0.0            # 不確認
   t_exit: 0.0
   cooldown: 0.0             # 不冷卻
+
+# ★ 對照組刻意不開快通道與融合層。
+#   對照組要模擬的就是「單幀 + 單閾值」，加任何東西都會污染比較。
+#   程式面也有保險：Pipeline(use_baseline_machine=True) 會強制關閉這兩層。
+fast_channel:
+  enabled: false
+
+fusion:
+  enabled: false
+
+color:
+  enabled: false
 
 visualize:
   bed_label: "Bed 07 (baseline)"

@@ -34,8 +34,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.pipeline import Pipeline
 
 
+def probe_fps(video: str) -> float:
+    import cv2
+    cap = cv2.VideoCapture(video)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    cap.release()
+    return float(fps) if 1.0 <= fps <= 240.0 else 30.0
+
+
 def run_one(video: str, cfg: dict, baseline_machine: bool) -> dict:
-    pipe = Pipeline(cfg, use_baseline_machine=baseline_machine)
+    # ★ enable_sink=False：對照實驗不該在 results/ 下寫出事件檔，
+    #   不然同一個檔案會被兩組 append，數字會互相污染。
+    pipe = Pipeline(cfg, use_baseline_machine=baseline_machine,
+                    enable_sink=False, fps_hint=probe_fps(video))
     try:
         for _ in pipe.run(video):
             pass
@@ -63,18 +74,26 @@ def main() -> None:
         print(f"[{name}] 實驗組...", flush=True)
         ours = run_one(video, cfg, baseline_machine=False)
 
+        # ★ 降幅用「總告警數」計算，包含快通道。
+        #   只算慢通道會讓數字好看，但護理師實際收到的是兩條通道的總和。
+        #   用對自己不利的算法，數字才站得住。
         rows.append({
             "clip": name,
             "baseline_alerts": base["alerts"],
-            "ours_alerts": ours["alerts"],
+            "ours_alerts": ours["alerts"],                 # 慢 + 快
+            "ours_alerts_slow": ours.get("alerts_slow", ours["alerts"]),
+            "ours_alerts_fast": ours.get("alerts_fast", 0),
             "dismissed_in_watching": ours["dismissed_in_watching"],
+            "glitch_rejected": ours.get("fast_channel", {}).get("glitch_rejected", 0),
+            "unreliable_rate": ours.get("fusion", {}).get("unreliable_rate"),
             "reduction_pct": (
                 round(100 * (1 - ours["alerts"] / base["alerts"]), 1)
                 if base["alerts"] else None
             ),
             "ours_events": ours["events"],
         })
-        print(f"  baseline={base['alerts']}  ours={ours['alerts']}")
+        print(f"  baseline={base['alerts']}  ours={ours['alerts']}"
+              f"（慢 {ours.get('alerts_slow', 0)} / 快 {ours.get('alerts_fast', 0)}）")
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -85,16 +104,45 @@ def main() -> None:
     lines = [
         "# 偽陽性對照實驗",
         "",
-        "| Clip | Baseline alerts | Ours | Reduction |",
-        "|---|---|---|---|",
+        "Reduction 以**總告警數**計算（慢通道 + 快通道），",
+        "不是只算慢通道 —— 護理師收到的是兩條通道的總和。",
+        "",
+        "| Clip | Baseline alerts | Ours (total) | slow | fast | Reduction |",
+        "|---|---|---|---|---|---|",
     ]
     for r in rows:
         red = f"{r['reduction_pct']}%" if r["reduction_pct"] is not None else "n/a"
         lines.append(
-            f"| {r['clip']} | {r['baseline_alerts']} | {r['ours_alerts']} | {red} |")
+            f"| {r['clip']} | {r['baseline_alerts']} | {r['ours_alerts']} | "
+            f"{r['ours_alerts_slow']} | {r['ours_alerts_fast']} | {red} |")
     tb, to = sum(r["baseline_alerts"] for r in rows), sum(r["ours_alerts"] for r in rows)
+    ts_, tf = (sum(r["ours_alerts_slow"] for r in rows),
+               sum(r["ours_alerts_fast"] for r in rows))
     total_red = f"{round(100 * (1 - to / tb), 1)}%" if tb else "n/a"
-    lines += ["|  |  |  |  |", f"| **Total** | **{tb}** | **{to}** | **{total_red}** |"]
+    lines += [
+        "|  |  |  |  |  |  |",
+        f"| **Total** | **{tb}** | **{to}** | **{ts_}** | **{tf}** | **{total_red}** |",
+        "",
+        "## 其他可量測的數字",
+        "",
+        "| Clip | WATCHING 中取消 | 偵測跳點擋下 | 不可信影格比例 |",
+        "|---|---|---|---|",
+    ]
+    for r in rows:
+        ur = ("n/a" if r["unreliable_rate"] is None
+              else f"{r['unreliable_rate'] * 100:.1f}%")
+        lines.append(f"| {r['clip']} | {r['dismissed_in_watching']} | "
+                     f"{r['glitch_rejected']} | {ur} |")
+    lines += [
+        "",
+        "- **WATCHING 中取消**：超標但沒撐過確認時間的次數。",
+        "  單閾值版本會把這些全部叫出來。",
+        "- **偵測跳點擋下**：快通道偵測到振幅、但位移沒站住而丟棄的次數。",
+        "  這是單幀推論出錯的實際發生次數。",
+        "- **不可信影格比例**：遮蔽導致無法判定的時間佔比。",
+        "  ★ 這個數字要主動講，不要藏 —— 它是系統的已知限制，",
+        "  被評審自己發現的代價遠高於自己說出來。",
+    ]
     out.with_suffix(".md").write_text("\n".join(lines), encoding="utf-8")
 
     try:

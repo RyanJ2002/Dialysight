@@ -24,7 +24,7 @@
 產出四張子圖：
     ① 關鍵點可見率 —— 相機角度好不好的第一指標
     ② arm_displacement 原始 vs 平滑 —— 主訊號
-    ③ torso_angle —— 躺姿偵測
+    ③ torso_tilt_deg —— 躺姿偵測（★ 不是 torso_angle，見第 ③ 格註解）
     ④ 各關鍵點的信心值分布 —— 調 min_confidence 的依據
 
 ★ 放行標準（三個都要過才回報「角度可用」）：
@@ -45,6 +45,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.inference.base import NUM_KEYPOINTS, KP, FrameObservation, Keypoint
+from src.inference.subject import torso_tilt_deg
 from src.temporal.features import FeatureConfig, FeatureExtractor
 from src.temporal.filter import FilterConfig, filter_keypoints
 from src.temporal.smooth import MedianFilter
@@ -75,7 +76,7 @@ def analyse(obs_list: list[FrameObservation], side: str = "right") -> dict:
     ))
     med = MedianFilter(window=7)
 
-    ts, raw_disp, sm_disp, angle, vis = [], [], [], [], []
+    ts, raw_disp, sm_disp, angle, tilt, vis = [], [], [], [], [], []
     conf_by_kp = [[] for _ in range(NUM_KEYPOINTS)]
 
     for o in obs_list:
@@ -89,6 +90,13 @@ def analyse(obs_list: list[FrameObservation], side: str = "right") -> dict:
         raw_disp.append(feats["arm_displacement"])
         sm_disp.append(med.update(feats["arm_displacement"]))
         angle.append(feats["torso_angle"])
+        # ★ 躺姿要看這個，不是 torso_angle。
+        #   torso_angle 是「肩線 vs 髖線」的夾角，站著、躺著、坐起
+        #   全都接近 0°，它分辨不出姿勢 —— 它量的是身體有沒有扭轉。
+        #   真正判躺姿的是肩中心→髖中心向量與水平線的夾角，
+        #   也就是 subject.py 的 torso_tilt_deg，45° 門檻是給它用的。
+        t = torso_tilt_deg(f.keypoints)
+        tilt.append(float("nan") if t is None else t)
         vis.append(f.visibility_ratio())
 
     wrist_i = int(KP.RIGHT_WRIST if side == "right" else KP.LEFT_WRIST)
@@ -106,6 +114,7 @@ def analyse(obs_list: list[FrameObservation], side: str = "right") -> dict:
         "raw": arr,
         "smooth": np.array(sm_disp, dtype=float),
         "angle": np.array(angle, dtype=float),
+        "tilt": np.array(tilt, dtype=float),
         "visibility": np.array(vis),
         "conf_by_kp": conf_by_kp,
         "wrist_seen": seen(wrist_i),
@@ -165,15 +174,27 @@ def plot(results: dict[str, dict], out: str, side: str) -> None:
     ax.set_title("(2) arm_displacement — faint = raw, bold = median filtered")
     ax.legend(fontsize=8); ax.grid(alpha=.3)
 
-    # ③ torso_angle
+    # ③ 躺姿判定 —— ★ 畫 torso_tilt_deg，不是 torso_angle
+    #
+    #   原本這一格畫的是 torso_angle 並標「low = lying」，那是錯的：
+    #   torso_angle 是肩線與髖線的夾角，站立、平躺、坐起全都接近 0°。
+    #   照那個標籤看圖，會誤以為躺姿判定正常。
+    #
+    #   真正決定 SubjectSelector 選不選這個人的是 torso_tilt_deg
+    #   （肩中心→髖中心 與水平線的夾角）：躺著接近 0°，站著接近 90°。
     ax = axes[2]
     for k, (name, a) in enumerate(results.items()):
-        ax.plot(a["ts"], a["angle"], color=colors[k % 10], lw=1.2, label=name)
-    ax.axhline(45, color="r", ls="--", lw=1, label="lying threshold 45°")
-    ax.set_ylabel("torso_angle (deg)")
+        ax.plot(a["ts"], a["tilt"], color=colors[k % 10], lw=1.6, label=name)
+        ax.plot(a["ts"], a["angle"], color=colors[k % 10], lw=0.8, alpha=.35,
+                ls=":", label=f"{name} · torso_angle (twist, NOT posture)")
+    ax.axhline(45, color="r", ls="--", lw=1,
+               label="lying threshold 45° — above this = not lying")
+    ax.set_ylim(-5, 95)
+    ax.set_ylabel("torso tilt (deg)")
     ax.set_xlabel("time (s)")
-    ax.set_title("(3) torso_angle — low = lying, high = upright")
-    ax.legend(fontsize=8); ax.grid(alpha=.3)
+    ax.set_title("(3) torso_tilt_deg — 0° = lying flat, 90° = standing/sitting up"
+                 "   (this is what SubjectSelector uses)")
+    ax.legend(fontsize=7); ax.grid(alpha=.3)
 
     # ④ 各關鍵點信心值
     ax = axes[3]

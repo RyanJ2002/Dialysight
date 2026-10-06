@@ -67,13 +67,20 @@ camera
 │   1. feature extraction                      │
 │   2. smoothing                               │
 │   3. sliding-window statistics (O(1))        │
-│   4. hysteresis state machine                │
-│   5. multi-signal consensus                  │
+│   4a. slow channel — hysteresis state machine│
+│   4b. fast channel — amplitude + persistence │
+│   5. multi-signal consensus + confidence     │
 └──────────────────────────────────────────────┘
-  │  events
+  │  events — 176 bytes each, flat scalars only
   ▼
 template-based session record  ──→  nurse station (text only)
 ```
+
+30 beds of event traffic is roughly **8.5 kbps**, against **120,000 kbps** for 30
+streams of 1080p video — a factor of 11,415. That claim is enforced in code, not
+by convention: `sink.validate_payload()` rejects any nested structure, so an
+attempt to smuggle a keypoint array into an outbound payload raises rather than
+quietly putting patient imagery on the network.
 
 **The temporal layer runs entirely on the host CPU.** A 15-minute window holds ~216 KB; all
 statistics use O(1) incremental updates. There is no GenAI model anywhere in the pipeline —
@@ -85,12 +92,40 @@ better than an LLM.
 | | Fast channel | Slow channel |
 |---|---|---|
 | Event type | Acute, visually obvious | Gradual, invisible in a single frame |
-| Basis | Single frame + 1–2 s confirmation | Sliding windows + state machine |
-| Latency | < 2 s | 5–30 s |
-| Example | Major bleed, patient leaves bed | Arm drift, rising agitation |
+| Watches | Amplitude within a 1 s window | Deviation from baseline, over minutes |
+| Confirms by | The displacement **holding** for 0.8 s | Sustained exceedance for 5 s |
+| Latency | 0.8 s | ~6 s |
+| Example | Patient sits up, arm yanked away | Arm drift, rising agitation |
+| Reads | `feats` (absolute) | `dev` (relative to baseline) |
 
-The temporal layer actively *hurts* acute events — a 10-second confirmation window is a
-10-second delay. Hence two channels.
+The temporal layer actively *hurts* acute events — a confirmation window is, by
+construction, a delay. Lowering the slow channel's confirmation time to cover
+them would undo the very mechanism that suppresses 94.7% of false positives.
+Hence two channels over one shared inference pass.
+
+**The hard part of the fast channel is not detecting large movements.** It is
+telling a real movement apart from a pose-estimation glitch — a frame where the
+model puts the wrist on a blanket fold or an IV pole. Both look identical in
+amplitude. The difference shows up in the following second: a real movement
+*stays*, a glitch snaps back. So the fast channel verifies persistence before
+alerting, and reports how many glitches it rejected (`glitch_rejected`).
+
+### Saying "unknown" instead of "normal"
+
+The fusion layer returns a risk score **and** a confidence in that score. When
+occlusion leaves too little signal, the state is `UNRELIABLE`, and the nurse
+station shows **"無法判定"** — not a green light.
+
+A naive consensus vote would report "no signal voted abnormal", i.e. *normal*,
+which is the most dangerous failure mode a monitoring system has: it makes staff
+believe someone is watching when nobody is. Our answer to "what if a blanket
+covers the arm?" is therefore not "we can see through blankets" — we cannot —
+but **"we know when we cannot see, and we say so."**
+
+Reliability gating is per-signal, keyed on the keypoints each feature actually
+depends on, not on the fraction of all 17 keypoints visible. A patient lying
+under a blanket never shows knees or ankles; that is normal, not occlusion. So a
+covered arm down-weights `arm_displacement` while `torso_angle` keeps voting.
 
 ---
 
@@ -100,6 +135,9 @@ The temporal layer actively *hurts* acute events — a 10-second confirmation wi
 git clone <repo-url> && cd dialysight
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+
+# 0. Verify everything without footage or hardware (4 seconds)
+python scripts/selftest.py
 
 # 1. Pre-compute keypoints once (much faster iteration afterwards)
 python scripts/dump_keypoints.py \
@@ -116,9 +154,18 @@ python scripts/run_demo.py \
 python scripts/run_experiment.py \
     --videos data/clips/clip_01_baseline.mp4 data/clips/clip_02_interference.mp4 \
     --out    results/false_positive_comparison
+
+# 4. Nurse-station overview (open http://localhost:8420)
+python scripts/nurse_station.py --port 8420
 ```
 
+Step 2 writes `results/events_<bed>.jsonl`. Open it: one JSON object per line,
+flat scalars only — no pixels, no coordinates, nothing from which a frame could
+be reconstructed. That file *is* the privacy argument.
+
 No accelerator is required for any of the above. Stage I runs entirely on a laptop.
+Nothing in the repo needs a camera either — `config/webcam.yaml` uses one if you
+have it, and `scripts/selftest.py` needs neither.
 
 ---
 
@@ -128,28 +175,55 @@ No accelerator is required for any of the above. Stage I runs entirely on a lapt
 src/
   inference/
     base.py                 ★ the contract: FrameObservation + InferenceBackend
+    subject.py              ★ pick the patient out of a multi-person frame
     ultralytics_backend.py    development backend (laptop)
     replay_backend.py         replay from pre-dumped JSON — fastest iteration
     hailo_backend.py          UGen300 backend (implemented after hardware arrives)
   temporal/
     filter.py               layer 0 — confidence filtering
     features.py             layer 1 — keypoints → clinically meaningful scalars
+    color.py                layer 1 — pose-guided bleeding detection (optional)
     smooth.py               layer 2 — median / moving average / EWMA
     window.py               layer 3 — sliding windows, O(1) mean/std/slope
-    state_machine.py        layer 4 — hysteresis state machine ★
+    state_machine.py        layer 4 — slow channel: hysteresis state machine ★
+    fast_channel.py         layer 4 — fast channel: amplitude + persistence ★
+  fusion.py                 layer 5 — weighted consensus + explicit confidence ★
   pipeline.py               glue — no algorithm logic lives here
+  sink.py                   ★ event output; payload validation enforces
+                              "no imagery leaves the bedside" in code
   report.py                 template-based session record (no LLM)
-  visualize.py              OpenCV compositing — this is the UI
+  visualize.py              OpenCV compositing — this is the bedside UI
+  station/dashboard.html    nurse-station overview (zero imagery)
 config/
   default.yaml              experiment group
-  baseline.yaml             control group: single threshold, no hysteresis
+  baseline.yaml             control group: single threshold, no hysteresis,
+                            no fast channel, no fusion
+  webcam.yaml               try it right now with a laptop camera
 scripts/
+  selftest.py               ★ 51 checks, no footage and no hardware required
   dump_keypoints.py
+  plot_feature.py           feature diagnostics + three go/no-go checks
+  calibrate_roi.py
   run_demo.py
   run_experiment.py         ★ the false-positive comparison
+  nurse_station.py          HTTP collector + overview page
+  benchmark.py
 data/
   annotations.md            ground truth for every clip
 ```
+
+### Verify the whole system in four seconds
+
+```bash
+python scripts/selftest.py
+```
+
+No footage, no accelerator, no model weights. It exercises the sliding windows,
+both channels, the fusion layer, subject selection, bleeding discrimination,
+payload validation, an end-to-end pipeline run on synthetic keypoints, the
+renderer and the session record — and prints the headline numbers
+(19 → 1 alerts, 176-byte payloads, 0.91 vs 0.50 monotonicity) so they are
+reproducible on any machine rather than only on ours.
 
 ### The one interface that matters
 
@@ -273,7 +347,12 @@ is added, default copyright applies.
 
 ---
 
-## Team notes
+## Documentation
 
-Code comments are written in Traditional Chinese for the team; this README is in English for
-review. Development guide: [`docs/開發指南.md`](docs/開發指南.md).
+| Document | Audience | Content |
+|---|---|---|
+| [`docs/程式碼導讀.md`](docs/程式碼導讀.md) | reviewers & team | **Full code walkthrough** — architecture, data flow, every module, variable conventions |
+| [`docs/開發指南.md`](docs/開發指南.md) | team | Setup, task ownership, FAQ |
+| [`docs/architecture.md`](docs/architecture.md) | reviewers | System architecture diagram (text form) |
+
+Code comments are written in Traditional Chinese for the team; this README is in English for review.

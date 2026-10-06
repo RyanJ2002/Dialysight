@@ -12,6 +12,19 @@ inference:
   # backend: replay 時使用
   # keypoints_json: data/clips/clip_03.json
 
+subject:
+  # 受試者選擇：多人畫面中認出病人
+  # ⚠️ roi 需要用 scripts/calibrate_roi.py 在正式素材上標定一次
+  #    攝影機一動就要重標
+  roi:
+    x_min: 0.15
+    y_min: 0.35
+    x_max: 0.85
+    y_max: 0.75
+  require_lying: true          # 躺姿判定，補 ROI 的漏洞
+  max_torso_angle_deg: 45.0    # 肩→髖向量與水平線夾角上限
+  min_torso_keypoints: 3
+
 filter:
   min_confidence: 0.5       # TODO: 拍完素材後用信心值分布調整
   min_visibility_ratio: 0.4
@@ -26,8 +39,9 @@ features:
 
 baseline:
   mode: auto                # auto | manual（待決事項 #4）
-  n_frames: 300             # 10 FPS 下約 30 秒
-  min_valid_frames: 50
+  duration_s: 30.0          # ★ 單位是秒，不是影格 —— 換 FPS 不會改變行為
+  min_valid_frames: 50      # 同時要湊滿這麼多格有效樣本才定案
+  max_duration_s: 120.0     # 超時仍湊不滿就用現有樣本定案，不要無限等
 
 smooth:
   default:
@@ -41,18 +55,65 @@ smooth:
       method: moving_average
       window: 5
 
+color:
+  # 姿態導引的滲血偵測。ROI 跟著手臂走，用上臂當參考區抵銷光線與膚色
+  enabled: false               # ⚠️ Stage I 選配。核心管線跑穩再開
+  wrist_side: right
+  band_width_ratio: 0.55       # ROI 寬度 ÷ 前臂長度
+  extend_beyond_wrist: 0.15    # 穿刺處可能靠近腕部
+  extend_beyond_elbow: 0.05
+  min_keypoint_conf: 0.4
+  min_roi_pixels: 200
+  percentile: 90.0             # 取高分位數，滲血初期不會被正常皮膚稀釋
+  use_reference: true          # ★ 用上臂參考區抵銷光線/白平衡/膚色
+
 windows:
   short: 5.0
   medium: 60.0
   long: 900.0
 
 state_machine:
+  # 慢通道：漸進性風險。看「偏離基準的量」持續多久
   enter_threshold: 0.15     # TODO: 拍完素材後實測調整
   exit_threshold: 0.10      # 必須小於 enter（遲滯）
   t_enter: 1.0
   t_confirm: 5.0
   t_exit: 3.0
   cooldown: 30.0
+
+fast_channel:
+  # 快通道：突發性風險。看「短時間內變化的幅度」是否站得住
+  # ⚠️ amplitude_threshold 與上面的 enter_threshold 不是同一個量綱，不要互相比較
+  enabled: true
+  window_s: 1.0             # 振幅觀察窗
+  amplitude_threshold: 0.12 # 窗內 (max − min) 超過此值啟動驗證
+  min_samples: 5
+  ref_window_s: 2.0        # ★ 參考值取自振幅窗「之前」這段，不會被跳變污染
+  min_ref_samples: 4
+  t_persist: 0.8            # ★ 位移要維持這麼久才算真事件（擋偵測跳點）
+  persist_ratio: 0.6
+  cooldown: 15.0
+
+fusion:
+  # 多訊號加權共識。關閉時系統行為與單一特徵版本完全相同
+  enabled: true
+  drive_state_machine: false   # ★ 預設 false：融合只觀測、不改變告警
+                               #   對照實驗要先有「只有主特徵」的基線數字
+  consensus_threshold: 0.5
+  min_confidence: 0.35         # 低於此 → UNRELIABLE（顯示「無法判定」而非「正常」）
+  degraded_confidence: 0.7
+  # signals 省略時自動依 color.enabled 組出預設訊號組
+  # 要自訂就照這個格式寫：
+  # signals:
+  #   - {feature: arm_displacement, weight: 1.0, t_lo: 0.10, t_hi: 0.25,
+  #      gate: keypoint_visibility, gate_floor: 0.35}
+
+sink:
+  # 事件輸出。★ 這一層讓「影像不出床邊」變成程式碼強制的規則
+  bed_id: "Bed07"
+  jsonl: results/events_{bed}.jsonl       # 本地紀錄，一行一事件
+  # http: http://nurse-station.local:8420/ingest   # 護理站收集器，可省略
+  status_interval_s: 5.0                  # 心跳間隔
 
 visualize:
   width: 1280
@@ -62,3 +123,5 @@ visualize:
   event_h: 160
   curve_span_s: 90.0
   bed_label: "Bed 07"
+  show_color_panel: false    # 開啟後右側分成兩條曲線（主訊號 + 滲血）
+  show_roi_overlay: false    # 影片上畫出前臂 ROI（紅）與上臂參考區（藍）

@@ -137,7 +137,7 @@ class DemoRenderer:
         new_event: Optional[Event] = None,
         timestamp: Optional[float] = None,
         color_cfg=None,
-        baseline_progress: Optional[tuple[int, int]] = None,
+        baseline_progress: Optional[tuple[float, float]] = None,   # (已過秒, 需要秒)
     ) -> np.ndarray:
         """合成單一影格。
 
@@ -178,10 +178,15 @@ class DemoRenderer:
         self._draw_events(canvas)
         return canvas
 
-    def _draw_baseline_progress(self, canvas: np.ndarray, done: int, need: int) -> None:
+    def _draw_baseline_progress(self, canvas: np.ndarray,
+                                done: float, need: float) -> None:
         """基準線建立中的提示畫面。
 
         沒有這個的話右側會是一片空白，觀眾（和評審）不知道系統在幹嘛。
+
+        單位是秒。影格數會隨 FPS 變動，秒數不會 ——
+        demo 時觀眾看到「12.4 / 30.0 s」知道還要等多久，
+        看到「124 / 300 frames」只會一頭霧水。
         """
         x0 = self.L.video_w + 16
         x1 = self.L.width - 16
@@ -200,11 +205,11 @@ class DemoRenderer:
         bw = (x1 - x0) - 56
         bx, by = x0 + 28, cy + 8
         cv2.rectangle(canvas, (bx, by), (bx + bw, by + 14), COLORS["grid"], -1)
-        frac = min(1.0, done / max(need, 1))
+        frac = min(1.0, done / max(need, 1e-6))
         cv2.rectangle(canvas, (bx, by), (bx + int(bw * frac), by + 14),
                       COLORS[State.WATCHING], -1)
 
-        self._text(canvas, f"{done} / {need} frames", (bx, by + 40),
+        self._text(canvas, f"{done:.1f} / {need:.1f} s", (bx, by + 40),
                    COLORS["text"], scale=0.6)
         self._text(canvas, f"{frac * 100:.0f}%", (x1 - 76, by + 40),
                    COLORS[State.WATCHING], scale=0.6)
@@ -402,14 +407,23 @@ class ComparisonRenderer:
 
     左邊的告警數字會一路飆高，右邊維持個位數。
 
-    TODO: 實作。做法是跑兩個 renderer，再用 np.hstack 併起來，
+    TODO: 【佳彣】實作，10/8 對照實驗前完成。
+          做法是跑兩個 renderer，再用 np.hstack 併起來，
           上方疊一條「ALERTS: 左 N 次 / 右 M 次」的計數列。
+
+    ⚠️ 右邊的計數要**含快通道**。
+       現在系統有兩條通道，只數慢通道會讓數字好看，但那不是護理師
+       實際會收到的量。run_experiment.py 的降幅也是用總和算的 ——
+       兩邊要一致，不然簡報上的數字會對不起來。
+
+       pipeline.summary() 的 alerts 已經是慢 + 快的總和，直接用它。
     """
 
     def __init__(self, baseline_renderer: DemoRenderer, ours_renderer: DemoRenderer):
         self.baseline = baseline_renderer
         self.ours = ours_renderer
-        raise NotImplementedError("B6 後續工作，10/8 對照實驗前完成")
+        raise NotImplementedError(
+            "ComparisonRenderer 尚未實作 —— 這是佳彣的工作項目，10/8 前完成")
 
 
 def make_writer(path: str, fps: float, layout: LayoutConfig) -> "cv2.VideoWriter":

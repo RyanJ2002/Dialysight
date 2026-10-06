@@ -43,8 +43,9 @@ features:
 
 baseline:
   mode: auto
-  n_frames: 50               # ★ 約 5 秒就建立好
+  duration_s: 5.0            # ★ 5 秒就建立好，不用等 30 秒
   min_valid_frames: 20
+  max_duration_s: 20.0
 
 smooth:
   default:
@@ -64,9 +65,28 @@ state_machine:
   t_exit: 1.5
   cooldown: 5.0
 
+fast_channel:
+  # 把手往旁邊快速一揮，應該在 0.5 秒內跳出 FAST 事件。
+  # 揮完馬上收回來的話會被 persist 檢查擋掉 —— 那正是它該做的事。
+  enabled: true
+  window_s: 0.8
+  amplitude_threshold: 0.07
+  min_samples: 4
+  ref_window_s: 2.0        # ★ 參考值取自振幅窗「之前」這段，不會被跳變污染
+  min_ref_samples: 4
+  t_persist: 0.5
+  persist_ratio: 0.6
+  cooldown: 5.0
+
+fusion:
+  enabled: true
+  drive_state_machine: false
+  min_confidence: 0.3
+
 sink:
   bed_id: "Webcam"
   jsonl: results/events_webcam.jsonl
+  status_interval_s: 5.0
 
 visualize:
   width: 1280
