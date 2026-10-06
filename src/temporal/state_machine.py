@@ -198,6 +198,17 @@ class HysteresisStateMachine:
             self.cfg.t_enter + self.cfg.t_confirm
         ):
             self._current.confirmed_at = ts
+            # ★ 在「確認的當下」就入列，不要等到事件結束才入列。
+            #
+            #   原本的寫法是在 _tick_alert 解除時才 append，結果是：
+            #   影片／治療結束時狀態還停在 ALERT 的那一筆，永遠不會進 events，
+            #   confirmed_events() 看不到它，床次紀錄也不會有它。
+            #
+            #   而那恰好是最不能漏的一筆 —— 監測結束時還在告警中的事件。
+            #
+            #   events 裡放的是同一個物件參照，之後 _tick_alert 設 end_time
+            #   會直接反映到清單裡這一筆上，不需要重新 append。
+            self.events.append(self._current)
             self._transition(State.ALERT, ts)
             return self._current      # ★ 唯一回傳 Event 的地方
 
@@ -208,13 +219,37 @@ class HysteresisStateMachine:
         self._current.peak_value = max(self._current.peak_value, value)
 
         if self._below_since is not None and ts - self._below_since >= self.cfg.t_exit:
+            # 這一筆已經在 events 裡了（確認時就入列），直接改它的欄位
             self._current.end_time = ts
             self._current.meta["outcome"] = "resolved"
-            self.events.append(self._current)
             self._current = None
             self._cooldown_until = ts + self.cfg.cooldown
             self._transition(State.COOLDOWN, ts)
         return None
+
+    def finalize(self, now: float) -> Optional[Event]:
+        """治療／影片結束時呼叫，收掉還開著的事件。
+
+        ★ 結束時仍在 ALERT 的事件要標記成 open_at_session_end，
+          不要標成 resolved —— 它沒有被解除，只是我們不再看了。
+          這兩件事在臨床紀錄上意義完全不同。
+
+        Returns:
+            被收掉的那筆事件，沒有的話 None。
+        """
+        if self._current is None:
+            return None
+
+        ev = self._current
+        ev.end_time = now
+        if ev.confirmed_at is not None:
+            ev.meta["outcome"] = "open_at_session_end"
+        else:
+            # 還在 WATCHING 就結束了，沒有升級成告警
+            ev.meta["outcome"] = "watching_at_session_end"
+            self.events.append(ev)
+        self._current = None
+        return ev
 
     def _tick_cooldown(self, ts: float, value: float) -> None:
         if ts >= self._cooldown_until:
@@ -237,8 +272,15 @@ class HysteresisStateMachine:
         return now - self._state_entered_at
 
     def confirmed_events(self) -> list[Event]:
-        """只回傳真正告警過的事件，不含 WATCHING 階段被取消的。"""
+        """只回傳真正告警過的事件，不含 WATCHING 階段被取消的。
+
+        包含「結束時還開著」的那一筆 —— 它確認過，只是沒等到解除。
+        """
         return [e for e in self.events if e.confirmed_at is not None]
+
+    def open_event(self) -> Optional[Event]:
+        """當前還沒結束的事件（WATCHING 或 ALERT 中）。"""
+        return self._current
 
     def dismissed_count(self) -> int:
         """WATCHING 階段被取消的次數。
@@ -300,6 +342,14 @@ class SingleThresholdStateMachine:
             if self.events and self.events[-1].is_open:
                 self.events[-1].end_time = timestamp
 
+        return None
+
+    def finalize(self, now: float) -> Optional[Event]:
+        """對照組的事件在觸發當下就入列了，這裡只補上結束時間。"""
+        if self.events and self.events[-1].is_open:
+            self.events[-1].end_time = now
+            self.events[-1].meta["outcome"] = "open_at_session_end"
+            return self.events[-1]
         return None
 
     def confirmed_events(self) -> list[Event]:

@@ -44,9 +44,42 @@ NAN = float("nan")
 
 @dataclass
 class BaselineConfig:
-    mode: str = "auto"          # "auto" | "manual"
-    n_frames: int = 300         # auto 模式：收集前幾影格（10 FPS = 30 秒）
-    min_valid_frames: int = 50  # 至少要這麼多有效影格才算建立成功
+    """基準線建立的參數。
+
+    ★ 單位是「秒」，不是「影格數」。
+
+      這點踩過坑：原本寫 n_frames=300，意思是「10 FPS 下約 30 秒」。
+      但 FPS 是會變的 —— 手機拍的粗拍是 30 FPS，300 格只有 10 秒；
+      換到硬體上跑 10 FPS，同樣 300 格變成 30 秒。
+      同一份 config 在兩台機器上行為完全不同，而且不會報錯，
+      只會讓基準線建立在錯的時間長度上。
+
+      系統裡其他所有時間參數（windows、state_machine）都是秒。
+      基準線沒有理由例外。
+    """
+    mode: str = "auto"              # "auto" | "manual"
+    duration_s: float = 30.0        # auto 模式：收集開頭幾秒
+    min_valid_frames: int = 50      # 至少要這麼多有效影格才算建立成功
+    max_duration_s: float = 120.0   # 超時仍未湊滿有效影格就用現有的湊合
+
+    # 相容舊 config。只在找不到 duration_s 時由 from_dict() 換算。
+    n_frames: Optional[int] = None
+
+    @classmethod
+    def from_dict(cls, raw: dict, fps_hint: float = 10.0) -> "BaselineConfig":
+        """從 config 區塊建立，並處理舊欄位。
+
+        舊 config 寫 n_frames 的話照樣能跑，但會印一行提醒，
+        換算用 fps_hint（影片的實際 FPS）而不是假設值。
+        """
+        raw = dict(raw)
+        n_frames = raw.pop("n_frames", None)
+        if n_frames is not None and "duration_s" not in raw:
+            raw["duration_s"] = float(n_frames) / max(fps_hint, 1e-6)
+            print(f"[baseline] config 用的是舊欄位 n_frames={n_frames}，"
+                  f"已依 {fps_hint:g} FPS 換算為 duration_s="
+                  f"{raw['duration_s']:.1f}。請改寫 config。")
+        return cls(**raw)
 
 
 class BaselineTracker:
@@ -57,9 +90,17 @@ class BaselineTracker:
         for obs in stream:
             feats = extractor(obs)
             if not bt.is_ready:
-                bt.observe(feats)
+                bt.observe(feats, obs.timestamp)
                 continue        # 建立基準期間不做事件判定
             dev = bt.deviation(feats)
+
+    結束條件（兩個都要滿足）：
+        1. 已經過 duration_s 秒
+        2. 至少蒐集到 min_valid_frames 格有效樣本
+
+    第 2 點是為了擋掉「開頭 30 秒病人剛好不在鏡頭裡」的情況 ——
+    那樣建出來的基準線是空的，後面每一格都會是 NaN。
+    超過 max_duration_s 仍湊不滿就放棄等待，用手上有的樣本定案。
     """
 
     def __init__(self, cfg: Optional[BaselineConfig] = None):
@@ -67,34 +108,82 @@ class BaselineTracker:
         self._samples: dict[str, list[float]] = {}
         self._baseline: dict[str, float] = {}
         self._count = 0
+        self._t0: Optional[float] = None
+        self._t_last: Optional[float] = None
+        self._finalized = False
 
     @property
     def is_ready(self) -> bool:
-        return bool(self._baseline)
+        """基準建立期是否結束。
 
-    def observe(self, features: dict[str, float]) -> None:
-        """在基準建立期收集樣本。"""
+        注意這是「結束」不是「成功」—— 超時但沒湊滿樣本時也會是 True，
+        此時 deviation() 對該特徵回傳 NaN，狀態機看到 NaN 不推進。
+        失敗要看得見，不要卡在建立期假裝還在努力。
+        """
+        return self._finalized or bool(self._baseline)
+
+    @property
+    def elapsed_s(self) -> float:
+        if self._t0 is None or self._t_last is None:
+            return 0.0
+        return self._t_last - self._t0
+
+    def progress(self) -> tuple[float, float]:
+        """(已經過秒數, 需要秒數)。給 UI 畫進度條用。"""
+        return (min(self.elapsed_s, self.cfg.duration_s), self.cfg.duration_s)
+
+    def observe(self, features: dict[str, float],
+                timestamp: Optional[float] = None) -> None:
+        """在基準建立期收集樣本。
+
+        timestamp 省略時退回「以影格數估算」的舊行為（假設 10 FPS），
+        只為了讓沒有時間軸的單元測試還能用。正式路徑一定要傳。
+        """
         if self.is_ready:
             return
 
         self._count += 1
+        if timestamp is None:
+            timestamp = self._count / 10.0        # 退路，不建議依賴
+
+        if self._t0 is None:
+            self._t0 = timestamp
+        self._t_last = timestamp
+
+        n_valid = 0
         for name, value in features.items():
             if value == value:              # 非 NaN
                 self._samples.setdefault(name, []).append(value)
+                n_valid += 1
 
-        if self._count >= self.cfg.n_frames:
+        elapsed = timestamp - self._t0
+        enough_time = elapsed >= self.cfg.duration_s
+        enough_data = self._max_sample_count() >= self.cfg.min_valid_frames
+        timed_out = elapsed >= self.cfg.max_duration_s
+
+        if (enough_time and enough_data) or timed_out:
             self._finalize()
 
+    def _max_sample_count(self) -> int:
+        return max((len(v) for v in self._samples.values()), default=0)
+
     def _finalize(self) -> None:
+        self._finalized = True
         for name, values in self._samples.items():
             if len(values) >= self.cfg.min_valid_frames:
                 # 用中位數，對開頭的雜訊較穩健
                 self._baseline[name] = float(np.median(values))
         self._samples.clear()
+        if not self._baseline:
+            # 一個特徵都沒建立起來。讓它在 summary 裡看得到，不要靜默失敗。
+            print(f"[baseline] 警告：{self.elapsed_s:.1f} 秒內沒有任何特徵"
+                  f"湊滿 {self.cfg.min_valid_frames} 格有效樣本。"
+                  "檢查 ROI 標定與關鍵點信心門檻。")
 
     def set_manual(self, features: dict[str, float]) -> None:
         """手動建立基準（護理師按鈕時呼叫）。"""
         self._baseline = {k: v for k, v in features.items() if v == v}
+        self._finalized = True
 
     def get(self, name: str) -> Optional[float]:
         return self._baseline.get(name)
@@ -114,6 +203,8 @@ class BaselineTracker:
         self._samples.clear()
         self._baseline.clear()
         self._count = 0
+        self._t0 = self._t_last = None
+        self._finalized = False
 
 
 # --------------------------------------------------------------------------
@@ -138,6 +229,10 @@ def _wrist_index(side: str) -> KP:
 
 def _shoulder_index(side: str) -> KP:
     return KP.RIGHT_SHOULDER if side == "right" else KP.LEFT_SHOULDER
+
+
+def _elbow_index(side: str) -> KP:
+    return KP.RIGHT_ELBOW if side == "right" else KP.LEFT_ELBOW
 
 
 def arm_displacement(obs: FrameObservation, cfg: FeatureConfig) -> float:
@@ -248,6 +343,54 @@ EXTRACTORS: dict[str, Callable[[FrameObservation, FeatureConfig], float]] = {
 }
 
 
+# --------------------------------------------------------------------------
+# 每個特徵真正依賴哪些關鍵點
+# --------------------------------------------------------------------------
+
+def feature_keypoints(name: str, cfg: FeatureConfig) -> list[KP]:
+    """這個特徵的計算需要哪些關鍵點。
+
+    ★ 這張表存在的理由，是一個踩過的坑：
+
+      融合層原本用 keypoint_visibility（17 點裡看得到幾點）
+      當作訊號可信度的閘門。那是錯的。
+
+      我們只用 6 個點：雙肩、雙髖、穿刺側的肘與腕。
+      躺在床上蓋著被子的病人，膝蓋、腳踝、耳朵本來就永遠看不到 ——
+      那是正常，不是遮蔽。
+
+      結果是 keypoint_visibility 永遠只有 6/17 ≈ 0.35，
+      系統在它被設計來運作的情境下，每一格都回報「訊號品質不佳」。
+      一個永遠在警告的可信度指標等於沒有可信度指標。
+
+      正確的做法是分別問：
+        「arm_displacement 需要的那兩個點，現在看得到嗎？」
+        「torso_angle 需要的那四個點，現在看得到嗎？」
+
+      這同時讓降權變得精準：被子蓋住手臂時只降 arm_displacement 的權重，
+      軀幹角度照常投票，而不是整個系統一起變成不可信。
+    """
+    if name in ("arm_displacement", "arm_displacement_velocity", "arm_depth_delta"):
+        return [_shoulder_index(cfg.wrist_side), _wrist_index(cfg.wrist_side)]
+    if name in ("torso_angle", "torso_angle_velocity", "bed_occupancy"):
+        return [KP.LEFT_SHOULDER, KP.RIGHT_SHOULDER, KP.LEFT_HIP, KP.RIGHT_HIP]
+    if name in ("roi_redness", "roi_coverage", "redness_monotonic"):
+        return [_elbow_index(cfg.wrist_side), _wrist_index(cfg.wrist_side)]
+    return []
+
+
+def feature_visibility(obs: FrameObservation, name: str,
+                       cfg: FeatureConfig) -> float:
+    """這個特徵所依賴的關鍵點，現在有幾成看得到。0–1。
+
+    沒有登記依賴關鍵點的特徵回傳 1.0（視為永遠可信）。
+    """
+    kps = feature_keypoints(name, cfg)
+    if not kps:
+        return 1.0
+    return sum(1 for k in kps if obs.kp(k).is_valid) / len(kps)
+
+
 class FeatureExtractor:
     """依 config 抽取啟用的特徵。
 
@@ -267,6 +410,18 @@ class FeatureExtractor:
             name: EXTRACTORS[name](obs, self.cfg)
             for name in self.cfg.enabled
         }
+
+    def visibilities(self, obs: FrameObservation) -> dict[str, float]:
+        """每個啟用特徵各自的關鍵點可見率。
+
+        回傳 {"arm_displacement_visibility": 1.0, "torso_angle_visibility": 0.5, ...}
+        ★ 融合層用這些當閘門，而不是用全身 17 點的可見率。
+        """
+        out = {f"{name}_visibility": feature_visibility(obs, name, self.cfg)
+               for name in self.cfg.enabled}
+        # 顏色模組的訊號不在 enabled 裡，但融合層可能會用到
+        out["roi_redness_visibility"] = feature_visibility(obs, "roi_redness", self.cfg)
+        return out
 
     @property
     def names(self) -> list[str]:

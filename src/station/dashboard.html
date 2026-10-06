@@ -18,6 +18,10 @@
     --bg:#16181d; --panel:#1f232b; --line:#2d323c;
     --text:#e8eaed; --dim:#9aa0ab;
     --normal:#4ec07a; --watching:#e0a13c; --alert:#e05858; --offline:#5a606b;
+    /* ★ unreliable 刻意不用綠色 —— 它的意思是「看不到，無法判定」。
+       用紫色明確區別於「正常」，才不會讓護理師以為這床有人在看。
+       ended 用灰色，代表這床次已經結束。 */
+    --unreliable:#9b7fd4; --ended:#6b7280;
     box-sizing:border-box;
     padding-top:env(safe-area-inset-top,0px);
     padding-bottom:env(safe-area-inset-bottom,0px);
@@ -54,7 +58,9 @@
   .bed.normal{border-left-color:var(--normal)}
   .bed.watching{border-left-color:var(--watching)}
   .bed.alert{border-left-color:var(--alert)}
-  .bed.cooldown,.bed.unknown{border-left-color:var(--dim)}
+  .bed.cooldown,.bed.unknown,.bed.baseline{border-left-color:var(--dim)}
+  .bed.unreliable{border-left-color:var(--unreliable)}
+  .bed.ended{border-left-color:var(--ended); opacity:.65}
   .bed.offline{border-left-color:var(--offline); opacity:.5}
 
   .bed-head{display:flex; align-items:center; justify-content:space-between; gap:8px}
@@ -65,7 +71,9 @@
   }
   .state.normal{color:var(--normal)} .state.watching{color:var(--watching)}
   .state.alert{color:var(--alert); background:#e0585822}
-  .state.cooldown,.state.unknown,.state.offline{color:var(--dim)}
+  .state.cooldown,.state.unknown,.state.offline,.state.baseline{color:var(--dim)}
+  .state.unreliable{color:var(--unreliable); background:#9b7fd422}
+  .state.ended{color:var(--ended)}
 
   .rows{margin-top:10px; display:grid; gap:3px}
   .row{display:flex; justify-content:space-between; font-size:12px; color:var(--dim)}
@@ -139,6 +147,11 @@ const FEATURE_LABEL = {
 const STATE_LABEL = {
   normal:"NORMAL", watching:"WATCHING", alert:"ALERT",
   cooldown:"COOLDOWN", unknown:"—",
+  baseline:"建立基準",
+  // ★ 寫「無法判定」而不是任何聽起來像沒事的字。
+  //   把「不知道」顯示成「正常」是監測系統最危險的失效模式。
+  unreliable:"無法判定",
+  ended:"已結束",
 };
 
 const fmtTime = iso => {
@@ -174,6 +187,8 @@ function bedCard(b){
         <span>病人辨識</span><b>${b.online ? (b.subject_found === false ? "未偵測" : "正常") : "—"}</b>
       </div>
       ${warnBaseline ? '<div class="row warn"><span>基準線</span><b>建立中</b></div>' : ""}
+      ${state === "unreliable" ? '<div class="row" style="color:var(--unreliable)"><span>遮蔽</span><b>訊號不足，無法判定</b></div>' : ""}
+      ${b.open_at_end ? '<div class="row" style="color:var(--alert)"><span>床次結束</span><b>結束時仍在告警</b></div>' : ""}
       ${!b.online ? `<div class="row"><span>最後回報</span><b>${b.age_s}s 前</b></div>` : ""}
     </div>
     ${vis == null ? "" : `<div class="meter"><i style="width:${vis}%"></i></div>`}
