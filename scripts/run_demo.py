@@ -102,10 +102,13 @@ def main() -> None:
                 result.obs,
                 result.display_features,     # 偏離量 + 滲血訊號
                 result.state,
-                result.any_event,            # ★ 兩條通道任一觸發都畫
+                result.new_event,
                 result.obs.timestamp,
                 color_cfg=color_cfg,
                 baseline_progress=result.baseline_progress,
+                baseline_ready=result.baseline_ready,
+                fusion=result.fusion,
+                fast_event=result.fast_event,
             )
             if writer:
                 writer.write(canvas)
