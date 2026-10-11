@@ -15,7 +15,8 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.pipeline import Pipeline
-from src.visualize import ComparisonRenderer, DemoRenderer, LayoutConfig
+from src.visualize import (ComparisonRenderer, DemoRenderer, LayoutConfig,
+                           PreviewWindow)
 
 
 def probe_fps(video: str) -> float:
@@ -64,6 +65,9 @@ def main() -> None:
                     enable_sink=False, fps_hint=fps)
     comparison = ComparisonRenderer(renderer_for(baseline_cfg),
                                     renderer_for(ours_cfg))
+    preview = (PreviewWindow("DialySight comparison",
+                             comparison.width, comparison.height)
+               if args.show else None)
     writer = None
     if args.out:
         out = Path(args.out)
@@ -87,8 +91,8 @@ def main() -> None:
             frame = comparison.render(base_result, ours_result)
             if writer is not None:
                 writer.write(frame)
-            if args.show:
-                cv2.imshow("DialySight comparison", frame)
+            if preview is not None:
+                preview.show(frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
         base_summary = baseline.summary()
