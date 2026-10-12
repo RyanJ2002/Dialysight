@@ -71,15 +71,18 @@ camera
 │   4b. fast channel — amplitude + persistence │
 │   5. multi-signal consensus + confidence     │
 └──────────────────────────────────────────────┘
-  │  events — 176 bytes each, flat scalars only
+  │  events — flat scalars only, 247 bytes mean (measured)
   ▼
 template-based session record  ──→  nurse station (text only)
 ```
 
-30 beds of event traffic is roughly **8.5 kbps**, against **120,000 kbps** for 30
-streams of 1080p video — a factor of 11,415. That claim is enforced in code, not
-by convention: `sink.validate_payload()` rejects any nested structure, so an
-attempt to smuggle a keypoint array into an outbound payload raises rather than
+A bed emits a heartbeat every 5 seconds plus an event when one occurs: **0.40 kbps per bed,
+about 12 kbps for 30 beds**, against **120,000 kbps** for 30 streams of 1080p video — a factor
+of roughly 10,000. Those figures are measured, not estimated: a two-bed run accumulated 23.9 KB
+over 306 seconds at a mean payload of 247 bytes.
+
+That claim is enforced in code, not by convention: `sink.validate_payload()` rejects any nested
+structure, so an attempt to smuggle a keypoint array into an outbound payload raises rather than
 quietly putting patient imagery on the network.
 
 **The temporal layer runs entirely on the host CPU.** A 15-minute window holds ~216 KB; all
@@ -94,27 +97,29 @@ better than an LLM.
 | Event type | Acute, visually obvious | Gradual, invisible in a single frame |
 | Watches | Amplitude within a 1 s window | Deviation from baseline, over minutes |
 | Confirms by | The displacement **holding** for 0.8 s | Sustained exceedance for 5 s |
-| Latency | 0.8 s | ~6 s |
+| Latency | 0.80 s (measured) | ~6 s (design budget) |
 | Example | Patient sits up, arm yanked away | Arm drift, rising agitation |
 | Reads | `feats` (absolute) | `dev` (relative to baseline) |
 
 The temporal layer actively *hurts* acute events — a confirmation window is, by
 construction, a delay. Lowering the slow channel's confirmation time to cover
-them would undo the very mechanism that suppresses 94.7% of false positives.
-Hence two channels over one shared inference pass.
+them would undo the very mechanism that suppresses the large majority of false
+positives. Hence two channels over one shared inference pass.
 
 **The hard part of the fast channel is not detecting large movements.** It is
 telling a real movement apart from a pose-estimation glitch — a frame where the
 model puts the wrist on a blanket fold or an IV pole. Both look identical in
 amplitude. The difference shows up in the following second: a real movement
 *stays*, a glitch snaps back. So the fast channel verifies persistence before
-alerting, and reports how many glitches it rejected (`glitch_rejected`).
+alerting, and reports how many glitches it rejected (`glitch_rejected`). On the
+evaluation clip it rejected 2 of 4 triggers.
 
 ### Saying "unknown" instead of "normal"
 
 The fusion layer returns a risk score **and** a confidence in that score. When
 occlusion leaves too little signal, the state is `UNRELIABLE`, and the nurse
-station shows **"無法判定"** — not a green light.
+station shows **"無法判定"** — not a green light. On the evaluation clip, 4.5%
+of assessed frames fell into that state.
 
 A naive consensus vote would report "no signal voted abnormal", i.e. *normal*,
 which is the most dangerous failure mode a monitoring system has: it makes staff
@@ -136,7 +141,7 @@ git clone <repo-url> && cd dialysight
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 0. Verify everything without footage or hardware (4 seconds)
+# 0. Verify everything without footage or hardware (~7 seconds)
 python scripts/selftest.py
 
 # 1. Pre-compute keypoints once (much faster iteration afterwards)
@@ -150,10 +155,8 @@ python scripts/run_demo.py \
     --out   results/clip_03_demo.mp4 \
     --report results/clip_03_session.md
 
-# 3. Reproduce the false-positive comparison
-python scripts/run_experiment.py \
-    --videos data/clips/clip_01_baseline.mp4 data/clips/clip_02_interference.mp4 \
-    --out    results/false_positive_comparison
+# 3. Reproduce the false-positive comparison on one clip
+python scripts/stage1_results.py --video data/clips/<clip>.mp4
 
 # 4. Nurse-station overview (open http://localhost:8420)
 python scripts/nurse_station.py --port 8420
@@ -176,7 +179,7 @@ src/
   inference/
     base.py                 ★ the contract: FrameObservation + InferenceBackend
     subject.py              ★ pick the patient out of a multi-person frame
-    ultralytics_backend.py    development backend (laptop)
+    ultralytics_backend.py    development backend (laptop) — AGPL, see Licensing
     replay_backend.py         replay from pre-dumped JSON — fastest iteration
     hailo_backend.py          UGen300 backend (implemented after hardware arrives)
   temporal/
@@ -192,27 +195,29 @@ src/
   sink.py                   ★ event output; payload validation enforces
                               "no imagery leaves the bedside" in code
   report.py                 template-based session record (no LLM)
-  visualize.py              OpenCV compositing — this is the bedside UI
+  visualize.py              OpenCV compositing — bedside UI + side-by-side comparison
   station/dashboard.html    nurse-station overview (zero imagery)
 config/
   default.yaml              experiment group
-  baseline.yaml             control group: single threshold, no hysteresis,
-                            no fast channel, no fusion
+  baseline.yaml             control group — see "How the control group is defined"
   webcam.yaml               try it right now with a laptop camera
 scripts/
-  selftest.py               ★ 51 checks, no footage and no hardware required
+  selftest.py               ★ 55 checks, no footage and no hardware required
+  stage1_results.py         ★ the false-positive comparison, with environment fingerprint
+  run_comparison.py         side-by-side comparison video
   dump_keypoints.py
   plot_feature.py           feature diagnostics + three go/no-go checks
   calibrate_roi.py
   run_demo.py
-  run_experiment.py         ★ the false-positive comparison
+  run_experiment.py         batch replay over pre-dumped keypoints
   nurse_station.py          HTTP collector + overview page
-  benchmark.py
+  benchmark.py              latency, FPS, CPU and memory
+  check_git_safety.py       pre-push check that no imagery is staged
 data/
   annotations.md            ground truth for every clip
 ```
 
-### Verify the whole system in four seconds
+### Verify the whole system in about seven seconds
 
 ```bash
 python scripts/selftest.py
@@ -221,9 +226,11 @@ python scripts/selftest.py
 No footage, no accelerator, no model weights. It exercises the sliding windows,
 both channels, the fusion layer, subject selection, bleeding discrimination,
 payload validation, an end-to-end pipeline run on synthetic keypoints, the
-renderer and the session record — and prints the headline numbers
-(19 → 1 alerts, 176-byte payloads, 0.91 vs 0.50 monotonicity) so they are
-reproducible on any machine rather than only on ours.
+renderer and the session record — 55 checks in total — and prints the headline
+numbers so they are reproducible on any machine rather than only on ours. The
+synthetic benchmark is seeded (`random.seed(0)`), so **two machines that report
+different numbers here have different code**, which makes this the fastest way
+to confirm a teammate's checkout matches yours.
 
 ### The one interface that matters
 
@@ -246,8 +253,9 @@ Coordinates are normalised to 0–1 so thresholds survive a change of camera or 
 
 ## Models
 
-All models are **pre-compiled HEFs from the Hailo Model Zoo**. We do not train and we do not
-compile. Figures below are Hailo's own measurements (Intel i5-9400, DFC v5.4.0, PCIe Gen3 x4).
+Stage I runs `yolov8s-pose` through Ultralytics on the laptop CPU. Stage II targets
+**pre-compiled HEFs from the Hailo Model Zoo** — we do not train and we do not compile.
+Figures below are Hailo's own measurements (Intel i5-9400, DFC v5.4.0, PCIe Gen3 x4).
 
 | Role | Model | float | hardware | quantisation loss | FPS (B=1) | params |
 |---|---|---|---|---|---|---|
@@ -266,21 +274,64 @@ compile. Figures below are Hailo's own measurements (Intel i5-9400, DFC v5.4.0, 
 > **HEF versioning:** a HEF must match your HailoRT version (`hailortcli --version`).
 > Hailo-8 HEFs do not run on Hailo-10H.
 
+> **Licensing note:** `yolov8s_pose` is derived from Ultralytics YOLOv8 and carries AGPL-3.0
+> regardless of format. Compiling it to a HEF does not change its licence. See
+> [Licensing](#licensing).
+
 ---
 
 ## Results
 
-<!-- Populate after running scripts/run_experiment.py on real footage -->
+Session A of the evaluation footage: **300.6 s, 9,019 frames, 720×1280 at 30 fps.**
+Simulated scene, team member acting as the patient.
 
-**False-positive comparison** — same footage, two configurations:
+### False-positive comparison — same footage, two configurations
 
-| Clip | Single threshold | DialySight | Reduction |
+| | Control (single threshold) | DialySight |
+|---|---|---|
+| Alarms | **29** | **3** (1 slow, 2 fast) |
+| Reduction | — | **−89.7%** |
+| Dismissed in WATCHING | — | 2 |
+| Fast-channel glitches rejected | — | 2 of 4 triggers |
+| Unreliable frames | — | 4.5% |
+
+The control fired **26 times for a single rolling-over movement**, 14 of them within
+8.4 seconds. DialySight reported that movement once.
+
+A second, quiet 192-second session produced **0 alarms from either configuration**.
+
+### How the control group is defined
+
+`config/baseline.yaml` deliberately models the naive approach — one threshold, no
+hysteresis, no confirmation window, no cooldown, and **no smoothing**. Being unsmoothed
+is what makes it fire repeatedly on one movement, and it is also why **its count varies by
+±1 between machines**: without a median filter, a difference in the third decimal place of
+a keypoint flips a threshold crossing. The DialySight side is unaffected — 3 alarms on
+every machine we have run it on.
+
+`scripts/stage1_results.py` records an environment fingerprint alongside the numbers for
+this reason. Part of the reduction above therefore comes from preprocessing rather than
+from the temporal logic; we have not yet separated the two contributions.
+
+### Detection latency
+
+| Stage | p50 | p95 | p99 |
 |---|---|---|---|
-| _pending real footage_ | | | |
+| Decode | 0.23 | 0.28 | 0.44 |
+| Pose inference | 49.73 | 58.37 | 76.26 |
+| **Temporal layer** | **0.04** | 0.07 | 0.12 |
+| Total | 50.00 | 58.76 | 77.40 |
 
-Synthetic-signal sanity check (140 s, 10 FPS, one genuine 35-second drift event plus 2%-probability
-noise spikes): **19 alerts → 1 alert, 94.7 % reduction, genuine event detected.**
-Reproduce with `python scripts/run_experiment.py`.
+Milliseconds, MacBook Air 13-inch (M3) 8 GB, **`device: cpu`** — the Neural Engine and
+GPU are not used. 19.1 FPS single stream; 30.3% of the whole machine's CPU for one bed.
+
+Fast-channel detection latency: **0.80 s measured**, against a 0.8 s design budget.
+
+### Synthetic benchmark
+
+A seeded synthetic signal (120 s at 10 FPS, one genuine 35-second drift plus 2%-probability
+noise spikes): **19 alerts → 1 alert, −94.7%, genuine event detected.** Reproduce with
+`python scripts/selftest.py` on any machine.
 
 ---
 
@@ -304,6 +355,12 @@ Reproduce with `python scripts/run_experiment.py`.
 5. **Degraded performance under occlusion.** Blankets and staff passing in front reduce keypoint
    visibility. The system down-weights via `keypoint_visibility` rather than firing blindly,
    but performance does drop
+6. **Bed-exit and sit-up detection are not implemented.** `bed_occupancy` is staged for a later
+   phase and `torso_tilt_deg` is not registered as a feature. Only `arm_displacement` produces
+   events today
+7. **The bleeding discriminator is implemented but not validated.** It passes a synthetic test
+   that separates seepage from a red blanket by colour monotonicity; it has not been tested
+   against real footage
 
 ---
 
@@ -318,19 +375,31 @@ and keeps the licensing position clean.
 
 ---
 
-## ⚠️ Licensing — unresolved
+## Licensing
 
-**Ultralytics YOLOv8 is AGPL-3.0.** The competition rules require winning entries to grant a
-perpetual, royalty-free licence to ASUS / Intel / Hailo for commercial use, with the right to
-sublicense. These may conflict.
+This repository is licensed under **AGPL-3.0** — see [`LICENSE`](LICENSE). A full component
+inventory is in [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
 
-Two paths under evaluation:
-1. Confirm whether the Hailo pre-compiled HEF carries different terms
-2. Switch to a more permissively licensed pose model (e.g. `centerpose_regnetx_800mf`,
-   AP 43.1, 125 FPS)
+AGPL-3.0 is required because Stage I uses **Ultralytics YOLOv8** (`yolov8s-pose`) for pose
+estimation, and Ultralytics is AGPL-3.0.
 
-**This repository's own licence is not yet selected** pending the above. Until a `LICENSE` file
-is added, default copyright applies.
+**Scope of the dependency.** `ultralytics` is one of three interchangeable inference backends,
+imported lazily inside `make_backend()` (`src/inference/base.py`). The `replay` and `hailo`
+backends do not use it. The Stage II deployment target is the UGen300 module running a compiled
+HEF, which does not require the `ultralytics` package at runtime.
+
+**Open item, disclosed here rather than discovered later.** The competition terms grant the
+organisers a perpetual, royalty-free, sublicensable commercial licence **for winning entries**.
+AGPL-3.0 does not permit granting those rights. The submission-stage grant — reproduction and
+public display for non-commercial promotion — *is* fully supported by AGPL-3.0, so there is no
+conflict at this stage.
+
+If this entry advances, the resolution is to replace the pose model with one outside the YOLOv8
+lineage, for example `centerpose_regnetx_800mf` (AP 43.1, 125 FPS) from the Hailo Model Zoo.
+Recompiling a YOLOv8 model to HEF does **not** change its licence, so the model lineage is what
+has to change, not the file format. This will require re-calibrating every temporal threshold,
+since a different model produces a different keypoint distribution — that cost is accounted for
+in the Stage II migration plan.
 
 ---
 
@@ -351,8 +420,8 @@ is added, default copyright applies.
 
 | Document | Audience | Content |
 |---|---|---|
-| [`docs/程式碼導讀.md`](docs/程式碼導讀.md) | reviewers & team | **Full code walkthrough** — architecture, data flow, every module, variable conventions |
-| [`docs/開發指南.md`](docs/開發指南.md) | team | Setup, task ownership, FAQ |
+| [`docs/程式說明.md`](docs/程式說明.md) | reviewers & team | Module-by-module description of the pipeline |
 | [`docs/architecture.md`](docs/architecture.md) | reviewers | System architecture diagram (text form) |
+| [`docs/開發指南.md`](docs/開發指南.md) | team | Setup, task ownership, FAQ |
 
 Code comments are written in Traditional Chinese for the team; this README is in English for review.
