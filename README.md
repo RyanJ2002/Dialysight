@@ -414,14 +414,5 @@ in the Stage II migration plan.
 - Venous pressure simulation for VND detection (incl. Redsense FDA clearance) — https://pmc.ncbi.nlm.nih.gov/articles/PMC10278846/
 - VND monitoring patent (source for the blanket-occlusion and roll-over descriptions) — https://patents.google.com/patent/US8348850
 
----
-
-## Documentation
-
-| Document | Audience | Content |
-|---|---|---|
-| [`docs/程式說明.md`](docs/程式說明.md) | reviewers & team | Module-by-module description of the pipeline |
-| [`docs/architecture.md`](docs/architecture.md) | reviewers | System architecture diagram (text form) |
-| [`docs/開發指南.md`](docs/開發指南.md) | team | Setup, task ownership, FAQ |
 
 Code comments are written in Traditional Chinese for the team; this README is in English for review.
