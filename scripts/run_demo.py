@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.pipeline import Pipeline
 from src.report import session_report
-from src.visualize import DemoRenderer, LayoutConfig, make_writer
+from src.visualize import DemoRenderer, LayoutConfig, PreviewWindow, make_writer
 
 
 def probe_fps(video: str) -> float:
@@ -92,6 +92,8 @@ def main() -> None:
 
     import cv2
     writer = make_writer(args.out, fps, layout) if args.out else None
+    preview = (PreviewWindow("DialySight", layout.width, layout.height)
+               if args.show else None)
     color_cfg = pipe.color_cfg if pipe.color_enabled else None
     last_ts = 0.0
 
@@ -102,16 +104,22 @@ def main() -> None:
                 result.obs,
                 result.display_features,     # 偏離量 + 滲血訊號
                 result.state,
-                result.any_event,            # ★ 兩條通道任一觸發都畫
+                result.new_event,
                 result.obs.timestamp,
                 color_cfg=color_cfg,
                 baseline_progress=result.baseline_progress,
+                baseline_ready=result.baseline_ready,
+                fusion=result.fusion,
+                fast_event=result.fast_event,
             )
             if writer:
                 writer.write(canvas)
-            if args.show:
-                cv2.imshow("DialySight", canvas)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
+            if preview is not None:
+                preview.show(canvas)
+                key = cv2.waitKey(1) & 0xFF
+                if key in (ord("l"), ord("L")):
+                    renderer.toggle_language()
+                if key == ord("q"):
                     break
     finally:
         if writer:
