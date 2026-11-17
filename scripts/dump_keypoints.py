@@ -44,10 +44,29 @@ def main() -> None:
         cfg["inference"]["hef"] = args.hef
     print(f"後端：{cfg['inference']['backend']}", flush=True)
 
+    # ★ 全片推論要跑好幾分鐘，所以輸出路徑在開跑前就要確認寫得進去。
+    #   原本是跑完 9000 格才在 write_text 那行炸 FileNotFoundError，
+    #   整趟結果直接丟掉 —— 路徑問題要在第一秒失敗，不是最後一秒。
+    out_path = Path(args.out)
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as probe:
+            probe.write("")
+    except OSError as e:
+        raise SystemExit(f"輸出路徑寫不進去：{out_path}\n  {e}")
+
     import cv2
+    if not Path(args.video).is_file():
+        raise SystemExit(f"找不到影片：{args.video}")
     cap = cv2.VideoCapture(args.video)
+    if not cap.isOpened():
+        cap.release()
+        raise SystemExit(f"開不了影片：{args.video}")
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     cap.release()
+    print(f"影片：{args.video}  {fps:.2f} fps"
+          + (f"  {total} 格" if total else ""), flush=True)
 
     frames = []
     with make_backend(cfg) as backend:
@@ -61,9 +80,10 @@ def main() -> None:
                 ],
             })
             if obs.frame_idx % 100 == 0:
-                print(f"  {obs.frame_idx} frames...", flush=True)
+                pct = f" ({obs.frame_idx*100//total}%)" if total else ""
+                print(f"  {obs.frame_idx} frames...{pct}", flush=True)
 
-    Path(args.out).write_text(
+    out_path.write_text(
         json.dumps({"video_path": args.video, "fps": fps, "frames": frames},
                    ensure_ascii=False),
         encoding="utf-8",

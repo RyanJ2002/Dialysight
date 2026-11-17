@@ -407,23 +407,194 @@ class ComparisonRenderer:
 
     左邊的告警數字會一路飆高，右邊維持個位數。
 
-    TODO: 【佳彣】實作，10/8 對照實驗前完成。
-          做法是跑兩個 renderer，再用 np.hstack 併起來，
-          上方疊一條「ALERTS: 左 N 次 / 右 M 次」的計數列。
+    用法（見 scripts/run_comparison.py）：
+        cmp = ComparisonRenderer(renderer_for(baseline_cfg),
+                                 renderer_for(ours_cfg))
+        writer = cv2.VideoWriter(..., (cmp.width, cmp.height))
+        canvas = cmp.render(baseline_result, ours_result)
 
-    ⚠️ 右邊的計數要**含快通道**。
+    ⚠️ 右邊的計數含快通道。
        現在系統有兩條通道，只數慢通道會讓數字好看，但那不是護理師
        實際會收到的量。run_experiment.py 的降幅也是用總和算的 ——
        兩邊要一致，不然簡報上的數字會對不起來。
 
-       pipeline.summary() 的 alerts 已經是慢 + 快的總和，直接用它。
+       所以這裡每格累加 new_event 與 fast_event **各自**計數，
+       不是用 any_event：兩條通道同一格都觸發時 any_event 只給一個，
+       會少算。跑完的總數與 pipeline.summary()["alerts"] 一致。
+
+    ⚠️ 文字一律用 ASCII。cv2.putText 畫不出中文，會變成一排問號，
+       而且不會報錯 —— 存成影片才發現就來不及了。
     """
 
-    def __init__(self, baseline_renderer: DemoRenderer, ours_renderer: DemoRenderer):
+    BAND_H = 84                      # 上方計數列高度（縮放前）
+    FLASH_FRAMES = 10                # 新警報觸發後閃幾格
+
+    def __init__(self, baseline_renderer: DemoRenderer, ours_renderer: DemoRenderer,
+                 scale: float = 1.0):
         self.baseline = baseline_renderer
         self.ours = ours_renderer
-        raise NotImplementedError(
-            "ComparisonRenderer 尚未實作 —— 這是佳彣的工作項目，10/8 前完成")
+        self.scale = float(scale)
+
+        bl, ol = baseline_renderer.L, ours_renderer.L
+        if (bl.width, bl.height) != (ol.width, ol.height):
+            raise ValueError(
+                f"兩邊的畫面尺寸必須一樣才能並排："
+                f"{bl.width}x{bl.height} vs {ol.width}x{ol.height}。"
+                "把兩份 config 的 visualize.width/height 改成相同。")
+
+        self._panel_w, self._panel_h = bl.width, bl.height
+        self._raw_w = self._panel_w * 2
+        self._raw_h = self._panel_h + self.BAND_H
+        self.width = int(round(self._raw_w * self.scale))
+        self.height = int(round(self._raw_h * self.scale))
+
+        self.n_base = 0
+        self.n_ours = 0
+        self.n_ours_slow = 0
+        self.n_ours_fast = 0
+        self._flash_base = 0
+        self._flash_ours = 0
+        self._ts = 0.0
+
+    # -- 計數 ------------------------------------------------------------
+
+    @staticmethod
+    def _fired(result) -> int:
+        """這一格觸發了幾個事件。兩條通道同格都觸發時要算 2。"""
+        return ((1 if getattr(result, "new_event", None) else 0)
+                + (1 if getattr(result, "fast_event", None) else 0))
+
+    # -- 繪製 ------------------------------------------------------------
+
+    def render(self, baseline_result, ours_result) -> np.ndarray:
+        """合成一格並排畫面。兩個 result 都是 pipeline.FrameResult。"""
+        self._ts = ours_result.obs.timestamp
+
+        nb = self._fired(baseline_result)
+        if nb:
+            self.n_base += nb
+            self._flash_base = self.FLASH_FRAMES
+        if getattr(ours_result, "new_event", None):
+            self.n_ours += 1
+            self.n_ours_slow += 1
+            self._flash_ours = self.FLASH_FRAMES
+        if getattr(ours_result, "fast_event", None):
+            self.n_ours += 1
+            self.n_ours_fast += 1
+            self._flash_ours = self.FLASH_FRAMES
+
+        left = self._panel(self.baseline, baseline_result)
+        right = self._panel(self.ours, ours_result)
+
+        canvas = np.empty((self._raw_h, self._raw_w, 3), dtype=np.uint8)
+        canvas[: self.BAND_H] = COLORS["bg"]
+        canvas[self.BAND_H:, : self._panel_w] = left
+        canvas[self.BAND_H:, self._panel_w:] = right
+
+        self._band(canvas)
+
+        # 中間分隔線，讓兩邊一眼分得開
+        cv2.line(canvas, (self._panel_w, 0), (self._panel_w, self._raw_h),
+                 COLORS["grid"], 2)
+
+        self._flash_base = max(0, self._flash_base - 1)
+        self._flash_ours = max(0, self._flash_ours - 1)
+
+        if self.scale != 1.0:
+            canvas = cv2.resize(canvas, (self.width, self.height),
+                                interpolation=cv2.INTER_AREA)
+        return canvas
+
+    def _panel(self, renderer: DemoRenderer, result) -> np.ndarray:
+        """呼叫既有的 DemoRenderer。display_features 是偏離量，與閾值線同量綱
+        —— 跟 run_demo.py 一致，不要換成 features，曲線會對不上閾值。"""
+        return renderer.render(
+            result.obs,
+            getattr(result, "display_features", None) or result.features,
+            result.state,
+            result.any_event,
+            result.obs.timestamp,
+            baseline_progress=getattr(result, "baseline_progress", None),
+        )
+
+    def _band(self, canvas: np.ndarray) -> None:
+        seam = self._panel_w
+
+        # 降幅先畫，跨在分隔線上 —— 這是整段影片要觀眾記住的數字。
+        # 先畫是為了拿到它的右緣，右半邊的文字要從那之後開始，
+        # 否則數字會疊在 "DIALYSIGHT / ALERTS n" 上面。
+        badge_right = seam
+        if self.n_base > 0:
+            cut = (self.n_base - self.n_ours) / self.n_base * 100.0
+            txt = f"-{cut:.1f}%"
+            (tw, _), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 1.1, 2)
+            x = seam - tw // 2
+            cv2.rectangle(canvas, (x - 20, 12), (x + tw + 20, 72),
+                          COLORS["panel"], -1)
+            DemoRenderer._text(canvas, txt, (x, 57),
+                               COLORS[State.NORMAL], scale=1.1, thickness=2)
+            badge_right = x + tw + 20
+
+        self._side(canvas, 0, "SINGLE THRESHOLD", self.n_base,
+                   None, self._flash_base, 24)
+        self._side(canvas, seam, "DIALYSIGHT", self.n_ours,
+                   f"slow {self.n_ours_slow} / fast {self.n_ours_fast}",
+                   self._flash_ours, max(24, badge_right - seam + 24))
+
+        mm, ss = divmod(int(self._ts), 60)
+        DemoRenderer._text(canvas, f"{mm:02d}:{ss:02d}",
+                           (self._raw_w - 96, self.BAND_H - 14),
+                           COLORS["text_dim"], scale=0.6)
+
+    def _side(self, canvas, x0: int, label: str, count: int,
+              sub: Optional[str], flash: int, pad: int) -> None:
+        colour = COLORS[State.ALERT] if flash else COLORS["text"]
+        count_txt = f"ALERTS {count}"
+        (cw, _), _ = cv2.getTextSize(count_txt, cv2.FONT_HERSHEY_SIMPLEX,
+                                     1.0, 2)
+        if flash:
+            cv2.rectangle(canvas, (x0 + pad - 10, 10),
+                          (x0 + pad + cw + 10, self.BAND_H - 10),
+                          COLORS["panel"], -1)
+        DemoRenderer._text(canvas, label, (x0 + pad, 34),
+                           COLORS["text_dim"], scale=0.56)
+        DemoRenderer._text(canvas, count_txt, (x0 + pad, 70),
+                           colour, scale=1.0, thickness=2)
+        if sub:
+            DemoRenderer._text(canvas, sub, (x0 + pad + cw + 24, 70),
+                               COLORS["text_dim"], scale=0.6)
+
+    # -- 跑完之後給 run_comparison.py 對帳用 -------------------------------
+
+    def tally(self) -> dict:
+        """渲染過程累加的計數。應與 pipeline.summary()['alerts'] 一致。"""
+        return {"baseline_alerts": self.n_base, "ours_alerts": self.n_ours,
+                "ours_alerts_slow": self.n_ours_slow,
+                "ours_alerts_fast": self.n_ours_fast}
+
+
+class PreviewWindow:
+    """即時預覽視窗。--show 用。
+
+    並排畫面是 2560 px 寬，大多數螢幕放不下，所以用 WINDOW_NORMAL
+    加 resizeWindow 縮到看得完的大小。縮的是視窗，不是寫進檔案的影格。
+    """
+
+    def __init__(self, title: str, width: int, height: int,
+                 max_width: int = 1600):
+        self.title = title
+        cv2.namedWindow(title, cv2.WINDOW_NORMAL)
+        k = min(1.0, max_width / max(1, width))
+        cv2.resizeWindow(title, int(width * k), int(height * k))
+
+    def show(self, frame: np.ndarray) -> None:
+        cv2.imshow(self.title, frame)
+
+    def close(self) -> None:
+        try:
+            cv2.destroyWindow(self.title)
+        except Exception:
+            pass
 
 
 def make_writer(path: str, fps: float, layout: LayoutConfig) -> "cv2.VideoWriter":
