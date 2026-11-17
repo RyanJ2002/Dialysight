@@ -21,11 +21,33 @@ HEF 輸出格式（scripts/probe_hef.py 實測）
     stride 32  20x20 : conv70(64) conv71(1) conv72(51)
 
     64 ch = 4 邊 x 16 個 DFL bin（channel = side*16 + bin，順序 l,t,r,b）
-     1 ch = 單類別（person）logit，未過 sigmoid
+     1 ch = 單類別（person）分數
     51 ch = 17 點 x 3（channel = kpt*3 + component）
 
 本檔不依 conv43 這類名稱對應，改用「空間尺寸 + 通道數」分組，
 換 HEF 版本或重新編譯後層名變了也不會壞。
+
+----------------------------------------------------------------------
+★ cls 分支的 sigmoid 已經折進 HEF 了（scripts/diag_decode.py 實測）
+----------------------------------------------------------------------
+Hailo 的 device_pre_post_layers 可以把 sigmoid 編譯進 HEF，在晶片上算完。
+這個 HEF 就是這樣，所以 cls 輸出已經是 0~1 的機率，不是 logit：
+
+    cls  conv44/58/71   min 0.0000   max 0.9137      ← 已是機率
+    DFL  conv43/57/70   每 16 bin 總和 15.99 ± 0.09  ← 仍是 logit，要 softmax
+    kpt  conv45/59/72   min -6.65  max 8.44          ← 仍是 logit，可見度要 sigmoid
+
+折了沒有從 HEF 檔案本身看不出來，而猜錯的症狀很難認：再 sigmoid 一次會把
+0~1 映到 0.5~0.73，於是**每個 anchor 都過門檻**。實測一格解出 2696 個人
+（總 anchor 數 8400），然後 max(area) 從裡面挑了一個隨機的 anchor，
+關鍵點偏移量解得對卻掛在錯的格子上 —— 骨架大致是人形，位置整團跑掉。
+
+所以不寫死「不要 sigmoid」，改成開場量一次（_detect_format）。
+授權問題若逼我們換成 centerpose_regnetx_800mf，新 HEF 未必也折了 sigmoid，
+寫死會再踩一次同一個坑。要強制可用 config：
+    inference:
+      cls_activation: auto     # auto | sigmoid | none
+      dfl_activation: auto     # auto | softmax | none
 
 ----------------------------------------------------------------------
 三個會讓結果悄悄錯掉的地方
@@ -119,6 +141,14 @@ class HailoBackend(InferenceBackend):
         self.iou = float(ic.get("iou", IOU_THRESHOLD))
         self._hef_path = hef_path
         self._closed = False
+
+        # 輸出形態。auto 時在第一格量出來（見 _detect_format），之後沿用。
+        self._cls_mode = str(ic.get("cls_activation", "auto")).lower()
+        self._dfl_mode = str(ic.get("dfl_activation", "auto")).lower()
+        self._cls_needs_sigmoid: bool | None = (
+            None if self._cls_mode == "auto" else self._cls_mode == "sigmoid")
+        self._dfl_needs_softmax: bool | None = (
+            None if self._dfl_mode == "auto" else self._dfl_mode == "softmax")
 
         params = hp.VDevice.create_params()
         if hasattr(hp, "HailoSchedulingAlgorithm"):
@@ -281,20 +311,56 @@ class HailoBackend(InferenceBackend):
                 "跑 python scripts/probe_hef.py --hef <你的 hef> 重新確認。")
         return out
 
+    def _detect_format(self, heads) -> None:
+        """量一次輸出的實際形態。只在第一格做，結果沿用。
+
+        判斷依據是數值範圍，不是 HEF 的 metadata —— metadata 看不出
+        device_pre_post_layers 折了什麼進去。
+
+          cls 全部落在 [0,1] 且沒有負值  → 已經是機率，不要再 sigmoid
+            （logit 的背景值會是很負的數，不可能整張圖都非負）
+          DFL 每 16 個 bin 總和 ≈ 1      → 已經 softmax 過
+
+        猜錯不會報錯，只會安靜地給出垃圾，所以這裡把判斷結果印出來。
+        """
+        if self._cls_needs_sigmoid is None:
+            lo = min(float(c.min()) for _, c, _, _ in heads)
+            hi = max(float(c.max()) for _, c, _, _ in heads)
+            self._cls_needs_sigmoid = not (lo >= -1e-6 and hi <= 1.0 + 1e-6)
+            print(f"[hailo] cls 值域 [{lo:.4f}, {hi:.4f}] → "
+                  + ("是 logit，套用 sigmoid" if self._cls_needs_sigmoid
+                     else "已是機率（sigmoid 折在 HEF 裡），不再套用"),
+                  flush=True)
+
+        if self._dfl_needs_softmax is None:
+            sums = [float(b.reshape(b.shape[0], b.shape[1], 4, REG_MAX)
+                          .sum(axis=-1).mean()) for b, _, _, _ in heads]
+            m = sum(sums) / len(sums)
+            self._dfl_needs_softmax = abs(m - 1.0) > 0.05
+            print(f"[hailo] DFL 每 16 bin 總和 {m:.4f} → "
+                  + ("是 logit，套用 softmax" if self._dfl_needs_softmax
+                     else "已 softmax 過，不再套用"), flush=True)
+
     def _decode(self, outputs: dict[str, np.ndarray], conf_thr: float):
         """解成 [(bbox_area, kp_xy(17,2), kp_conf(17,))]，座標在 640x640 模型座標系。"""
         boxes_all, scores_all, kxy_all, kcf_all = [], [], [], []
         bins = np.arange(REG_MAX, dtype=np.float32)
 
-        for box_t, cls_t, kpt_t, stride in self._group_heads(outputs):
-            scores = _sigmoid(cls_t[:, :, 0])
+        heads = self._group_heads(outputs)
+        if self._cls_needs_sigmoid is None or self._dfl_needs_softmax is None:
+            self._detect_format(heads)
+
+        for box_t, cls_t, kpt_t, stride in heads:
+            scores = (_sigmoid(cls_t[:, :, 0]) if self._cls_needs_sigmoid
+                      else cls_t[:, :, 0])
             rows, cols = np.nonzero(scores >= conf_thr)
             if rows.size == 0:
                 continue
 
             # --- bbox：DFL 期望值 → 四邊距離（grid 單位，順序 l,t,r,b）---
             reg = box_t[rows, cols].reshape(-1, 4, REG_MAX)
-            dist = (_softmax(reg, -1) * bins).sum(-1)
+            dist = ((_softmax(reg, -1) if self._dfl_needs_softmax else reg)
+                    * bins).sum(-1)
             ax = cols.astype(np.float32) + 0.5          # anchor 在格中心
             ay = rows.astype(np.float32) + 0.5
             boxes = np.stack([
@@ -363,7 +429,9 @@ class HailoBackend(InferenceBackend):
             keypoints=keypoints,
             raw_frame=frame,
             meta={"backend": "hailo", "infer_ms": round(elapsed_ms, 2),
-                  "hef": self._hef_path.name, "people": len(people)},
+                  "hef": self._hef_path.name, "people": len(people),
+                  "cls_sigmoid": self._cls_needs_sigmoid,
+                  "dfl_softmax": self._dfl_needs_softmax},
         )
 
     def close(self) -> None:
