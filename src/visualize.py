@@ -430,3 +430,4 @@ def make_writer(path: str, fps: float, layout: LayoutConfig) -> "cv2.VideoWriter
     """建立影片輸出器。mp4v 在大多數平台都能用。"""
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     return cv2.VideoWriter(path, fourcc, fps, (layout.width, layout.height))
+ 
