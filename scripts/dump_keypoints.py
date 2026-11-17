@@ -29,9 +29,20 @@ def main() -> None:
     ap.add_argument("--video", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--config", default="config/default.yaml")
+    ap.add_argument("--backend", choices=["ultralytics", "hailo"], default=None,
+                    help="覆寫 config 的 inference.backend。"
+                         "等價驗證要用這個，不要另外開一份 config："
+                         "兩次 dump 必須只差這一行，多一份 config 就會悄悄差第二個地方。")
+    ap.add_argument("--hef", default=None,
+                    help="搭配 --backend hailo，指定 HEF 路徑")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+    if args.backend:
+        cfg["inference"]["backend"] = args.backend
+    if args.hef:
+        cfg["inference"]["hef"] = args.hef
+    print(f"後端：{cfg['inference']['backend']}", flush=True)
 
     import cv2
     cap = cv2.VideoCapture(args.video)
