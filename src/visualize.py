@@ -619,3 +619,4 @@ class ComparisonRenderer:
 def make_writer(path: str, fps: float, layout: LayoutConfig) -> cv2.VideoWriter:
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     return cv2.VideoWriter(path, fourcc, fps, (layout.width, layout.height))
+ 
