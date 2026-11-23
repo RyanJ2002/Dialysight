@@ -36,7 +36,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.pipeline import Pipeline
 from src.report import session_report
-from src.visualize import DemoRenderer, LayoutConfig, PreviewWindow, make_writer
+from src.visualize import (DemoRenderer, PreviewWindow, layout_from_config,
+                           make_writer, thresholds_from_config)
 
 
 def probe_fps(video: str) -> float:
@@ -71,14 +72,10 @@ def main() -> None:
 
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
 
-    layout = LayoutConfig(**{k: v for k, v in cfg.get("visualize", {}).items()
-                             if k in LayoutConfig.__dataclass_fields__})
+    layout = layout_from_config(cfg)
     renderer = DemoRenderer(
         layout=layout,
-        thresholds={
-            "enter": cfg["state_machine"]["enter_threshold"],
-            "exit": cfg["state_machine"]["exit_threshold"],
-        },
+        thresholds=thresholds_from_config(cfg),
         primary_feature=cfg["features"]["enabled"][0],
     )
 
@@ -111,6 +108,7 @@ def main() -> None:
                 baseline_ready=result.baseline_ready,
                 fusion=result.fusion,
                 fast_event=result.fast_event,
+                fast_verifying=result.fast_verifying,
             )
             if writer:
                 writer.write(canvas)

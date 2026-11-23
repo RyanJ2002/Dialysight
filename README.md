@@ -162,6 +162,9 @@ python scripts/stage1_results.py --video data/clips/<clip>.mp4
 python scripts/nurse_station.py --port 8420
 ```
 
+**Step-by-step operating guide (Chinese)** — bedside screen, nurse station,
+record sign-off, `--demo` mode and the optional Hailo LLM: [docs/USAGE.md](docs/USAGE.md).
+
 Step 2 writes `results/events_<bed>.jsonl`. Open it: one JSON object per line,
 flat scalars only — no pixels, no coordinates, nothing from which a frame could
 be reconstructed. That file *is* the privacy argument.
@@ -196,7 +199,9 @@ src/
                               "no imagery leaves the bedside" in code
   report.py                 template-based session record (no LLM)
   visualize.py              OpenCV compositing — bedside UI + side-by-side comparison
-  station/dashboard.html    nurse-station overview (zero imagery)
+  station/dashboard.html    nurse-station UI: beds, events, record sign-off, report (zero imagery)
+  station/records.py        end-of-treatment draft + fact check (optional LLM rewrite, gated)
+  station/demo.py           `--demo` bed simulator (real payload format)
 config/
   default.yaml              experiment group
   baseline.yaml             control group — see "How the control group is defined"

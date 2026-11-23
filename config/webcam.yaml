@@ -86,6 +86,7 @@ fusion:
 sink:
   bed_id: "Webcam"
   jsonl: results/events_webcam.jsonl
+  http: http://localhost:8420/ingest   # 護理站收集器（同 default.yaml）
   status_interval_s: 5.0
 
 visualize:
