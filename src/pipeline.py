@@ -83,6 +83,7 @@ class FrameResult:
     window_stats: dict = field(default_factory=dict)
     color: dict[str, float] = field(default_factory=dict) # 滲血訊號
     fusion: Optional[FusionResult] = None                 # 融合結果
+    fast_verifying: bool = False        # 快通道正在驗證位移是否站得住（UI 顯示用）
 
     @property
     def any_event(self) -> Optional[Event]:
@@ -247,6 +248,7 @@ class Pipeline:
                 baseline_ready=False,
                 baseline_progress=self.baseline.progress(),
                 color=color,
+                fast_verifying=self.fast is not None and self.fast.is_verifying,
             )
             self._emit(result)
             return result
@@ -292,6 +294,7 @@ class Pipeline:
             },
             color=color,
             fusion=fusion_result,
+            fast_verifying=self.fast is not None and self.fast.is_verifying,
         )
         self._emit(result)
         return result

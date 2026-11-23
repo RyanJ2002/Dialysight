@@ -1,246 +1,811 @@
 <!DOCTYPE html>
 <!--
-  護理站多床總覽。
+  DialySight 護理站（單一頁面，左側選單切換四個畫面）
+
+    床位總覽     哪一床要處理？點床位看詳情；告警按「確認處理」，到床邊處理按「照護中」
+    事件與告警   這一班發生的所有事件；觀察只記錄、不通知，告警要確認
+    紀錄整理     治療結束後自動起草，護理師補充、核對、簽核後才寫入
+    報表與裝置   本班統計、各床連線狀態、院內網路上實際傳了什麼
 
   ★ 這一頁上沒有任何影像。全部資料都來自床邊送過來的文字 payload。
-    這就是「影像不出床邊」在產品面的呈現。
+  ★ 確認、照護暫停、簽核只存在護理站，不會回送床邊 —— 床邊的偵測永遠照常進行。
 
-  由 scripts/nurse_station.py 提供，每 2 秒輪詢 /api/state。
-  只用原生 JS，不依賴任何框架。
+  由 scripts/nurse_station.py 提供，每 2 秒輪詢。只用原生 JS，不連外網（字型用系統字型）。
+  設計：參考 UI 原型「方向 C」的配色與版面，頁數從 6 頁簡化成 4 頁。
 -->
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>DialySight — 護理站總覽</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DialySight 護理站</title>
 <style>
-  :root{
-    --bg:#16181d; --panel:#1f232b; --line:#2d323c;
-    --text:#e8eaed; --dim:#9aa0ab;
-    --normal:#4ec07a; --watching:#e0a13c; --alert:#e05858; --offline:#5a606b;
-    /* ★ unreliable 刻意不用綠色 —— 它的意思是「看不到，無法判定」。
-       用紫色明確區別於「正常」，才不會讓護理師以為這床有人在看。
-       ended 用灰色，代表這床次已經結束。 */
-    --unreliable:#9b7fd4; --ended:#6b7280;
-    box-sizing:border-box;
-    padding-top:env(safe-area-inset-top,0px);
-    padding-bottom:env(safe-area-inset-bottom,0px);
-  }
-  *,*::before,*::after{box-sizing:inherit}
-  html{scroll-padding-top:env(safe-area-inset-top,0px)}
-  body{
-    margin:0; background:var(--bg); color:var(--text);
-    font:14px/1.5 -apple-system,"Noto Sans TC","Segoe UI",system-ui,sans-serif;
-  }
-  header{
-    display:flex; align-items:baseline; gap:16px; flex-wrap:wrap;
-    padding:16px 20px; border-bottom:1px solid var(--line);
-    position:sticky; top:env(safe-area-inset-top,0px); background:var(--bg); z-index:5;
-  }
-  h1{font-size:17px; margin:0; letter-spacing:.3px}
-  .sub{color:var(--dim); font-size:12px}
-  .spacer{flex:1}
-  .pill{
-    background:var(--panel); border:1px solid var(--line);
-    padding:4px 10px; border-radius:999px; font-size:12px; color:var(--dim);
-  }
-  .pill b{color:var(--text); font-weight:600}
+:root{
+  --bg:#F3F4F6; --card:#FFFFFF; --line:#E3E6EA; --line2:#EEF0F3; --soft:#F5F7FA;
+  --ink:#15191E; --muted:#5A6370; --faint:#8A93A0;
+  --primary:#1F5C99; --primary-bg:#E8F0F9; --navy:#18202B; --nav-sel:#26405E;
+  --ok:#2E8B57; --ok-ink:#1F6B45; --ok-bg:#EAF5EF;
+  --watch:#E39A12; --watch-ink:#9A5B00; --watch-bg:#FFF5E0; --watch-head:#FBE3B0;
+  --alert:#D0342C; --alert-ink:#B02A23; --alert-bg:#FDF1F0; --alert-head2:#F4C9C5;
+  --unrel:#6B7280; --unrel-line:#9AA3AE;
+  --radius:14px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font:14px/1.5 "Segoe UI","Microsoft JhengHei","Noto Sans TC","PingFang TC",system-ui,sans-serif;font-variant-numeric:tabular-nums}
+button{font:inherit;cursor:pointer}
+a{color:var(--primary);text-decoration:none}
+.app{display:grid;grid-template-columns:208px minmax(0,1fr);min-height:100vh}
 
-  main{padding:20px; max-width:1400px; margin:0 auto}
-  .grid{
-    display:grid; gap:12px;
-    grid-template-columns:repeat(auto-fill,minmax(230px,1fr));
-  }
-  .bed{
-    background:var(--panel); border:1px solid var(--line); border-left-width:4px;
-    border-radius:8px; padding:12px 14px; min-height:118px;
-  }
-  .bed.normal{border-left-color:var(--normal)}
-  .bed.watching{border-left-color:var(--watching)}
-  .bed.alert{border-left-color:var(--alert)}
-  .bed.cooldown,.bed.unknown,.bed.baseline{border-left-color:var(--dim)}
-  .bed.unreliable{border-left-color:var(--unreliable)}
-  .bed.ended{border-left-color:var(--ended); opacity:.65}
-  .bed.offline{border-left-color:var(--offline); opacity:.5}
+/* 左側選單 */
+.side{background:var(--navy);color:#C9D1DB;padding:18px 12px;display:flex;flex-direction:column;gap:2px;position:sticky;top:0;height:100vh}
+.brand{display:flex;align-items:center;gap:10px;padding:2px 8px 20px}
+.brand b{color:#fff;font-size:16px;display:block;line-height:1.2}
+.brand small{font-size:11px;color:#8D98A6}
+.nav{display:flex;align-items:center;gap:10px;padding:10px;border-radius:8px;color:#C9D1DB}
+.nav:hover{background:#222C38;color:#fff}
+.nav.on{background:var(--nav-sel);color:#fff;font-weight:600}
+.nav .n{margin-left:auto;min-width:20px;text-align:center;padding:0 6px;border-radius:999px;background:#3A4757;color:#fff;font-size:11px;font-weight:700}
+.nav .n.red{background:var(--alert)}
+.nav .n:empty{display:none}
+.side .grow{flex:1}
+.side-btn{display:flex;align-items:center;gap:8px;padding:9px 10px;border:1px solid #2E3A48;border-radius:8px;background:transparent;color:#C9D1DB;font-size:13px;margin-bottom:8px}
+.side-btn.on{border-color:#3E6E9E;background:#1E2C3D;color:#fff}
+.who{display:flex;align-items:center;gap:10px;padding:10px;border-radius:10px;background:#222C38;border:0;color:inherit;text-align:left;width:100%}
+.who .av{width:30px;height:30px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;flex:none}
+.who b{color:#fff;display:block;line-height:1.3}
+.who small{font-size:11px;color:#8D98A6}
 
-  .bed-head{display:flex; align-items:center; justify-content:space-between; gap:8px}
-  .bed-id{font-size:16px; font-weight:600}
-  .state{
-    font-size:11px; letter-spacing:.6px; text-transform:uppercase;
-    padding:2px 8px; border-radius:4px; background:#00000040;
-  }
-  .state.normal{color:var(--normal)} .state.watching{color:var(--watching)}
-  .state.alert{color:var(--alert); background:#e0585822}
-  .state.cooldown,.state.unknown,.state.offline,.state.baseline{color:var(--dim)}
-  .state.unreliable{color:var(--unreliable); background:#9b7fd422}
-  .state.ended{color:var(--ended)}
+/* 頁首 */
+.top{display:flex;flex-wrap:wrap;align-items:center;gap:8px 18px;padding:14px 28px;background:#fff;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+.top h1{margin:0;font-size:18px}
+.top .desc{color:var(--muted)}
+.top .grow{flex:1}
+.privacy{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:13px}
+.demo-tag{padding:2px 10px;border-radius:999px;background:var(--watch-bg);color:var(--watch-ink);font-size:12px;font-weight:700}
+.clock{font-size:20px;font-weight:600}
+main{padding:22px 28px 32px}
+.view{display:none}
+.view.on{display:block}
 
-  .rows{margin-top:10px; display:grid; gap:3px}
-  .row{display:flex; justify-content:space-between; font-size:12px; color:var(--dim)}
-  .row b{color:var(--text); font-weight:500; font-variant-numeric:tabular-nums}
-  .warn{color:var(--watching)}
+/* 共用 */
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius)}
+.card-h{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:14px 20px;border-bottom:1px solid var(--line2)}
+.card-h h2{margin:0;font-size:15px}
+.hint{font-size:12px;color:var(--muted)}
+.muted{color:var(--muted)}
+.btn{min-height:40px;padding:0 14px;border:1px solid #D5DAE0;border-radius:10px;background:#fff;color:var(--ink);font-weight:600}
+.btn:hover{border-color:#B9C1CB}
+.btn.primary{border:0;background:var(--primary);color:#fff}
+.btn.danger{border:0;background:var(--alert);color:#fff;font-size:15px;font-weight:700}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.sm{min-height:32px;padding:0 10px;font-size:13px;border-radius:8px}
+.dot{width:9px;height:9px;border-radius:50%;flex:none;display:inline-block}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:700;white-space:nowrap}
+.k-alert{background:var(--alert);color:#fff}
+.k-watch{background:var(--watch-bg);color:var(--watch-ink)}
+.k-unrel{background:#fff;color:#4B5563;border:1.5px dashed var(--unrel-line)}
+.k-care{background:var(--primary-bg);color:var(--primary)}
+.k-ok{background:var(--ok-bg);color:var(--ok-ink)}
+.k-grey{background:#F3F4F6;color:var(--muted)}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:18px}
+.kpi{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.kpi .l{font-size:12px;color:var(--muted)}
+.kpi .v{font-size:28px;font-weight:700;line-height:1.3}
+.kpi .v small{font-size:14px;font-weight:400;color:var(--muted);margin-left:4px}
+.kpi .s{font-size:12px;color:var(--muted)}
+.kpi.hot{border-color:#F1B8B3;background:var(--alert-bg)}
+.kpi.hot .v{color:var(--alert)}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font-size:12px;font-weight:600;color:var(--muted);background:#FAFBFC;padding:10px 12px}
+td{padding:11px 12px;border-top:1px solid var(--line2)}
+th:first-child,td:first-child{padding-left:20px}
+th:last-child,td:last-child{padding-right:20px}
+.empty{padding:28px 20px;color:var(--muted);text-align:center}
+.toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,20px);background:var(--navy);color:#fff;padding:10px 18px;border-radius:10px;opacity:0;transition:.25s;pointer-events:none;z-index:20}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+code{background:#EEF0F3;padding:1px 6px;border-radius:5px;font-size:12.5px}
 
-  .meter{height:3px; background:#00000050; border-radius:2px; margin-top:8px; overflow:hidden}
-  .meter i{display:block; height:100%; background:var(--normal); transition:width .4s}
+/* 床位總覽 */
+.ward{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:20px;align-items:start}
+.stat-line{display:flex;flex-wrap:wrap;gap:6px 22px;color:var(--muted);margin-bottom:14px}
+.stat-line b{color:var(--ink);font-size:16px}
+.beds{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;padding:18px 20px}
+.bed{text-align:left;padding:0;border:1px solid var(--line);border-radius:12px;background:#fff;overflow:hidden;display:flex;flex-direction:column;min-height:132px}
+.bed:hover{border-color:#B9C1CB}
+.bed.sel{outline:2px solid var(--primary);outline-offset:-1px;box-shadow:0 6px 18px -10px rgba(31,92,153,.6)}
+.bed .head{display:flex;justify-content:space-between;align-items:center;padding:6px 12px;background:#EEF1F4;color:#2B3644;font-size:13px}
+.bed .head b{font-size:15px}
+.bed .body{display:flex;flex-direction:column;gap:5px;padding:10px 12px 12px;flex:1;width:100%}
+.bed .state{display:flex;align-items:center;gap:7px;font-weight:700}
+.bed .line{font-size:13px;color:var(--muted)}
+.bed svg{margin-top:auto;width:100%;height:26px;display:block}
+.bed.s-alert{background:var(--alert-bg);border-color:#F1B8B3}
+.bed.s-alert .head{background:var(--alert);color:#fff}
+.bed.s-alert .state{color:var(--alert-ink)}
+.bed.s-acked .head{background:var(--alert-head2);color:#7A1D18}
+.bed.s-acked .state{color:var(--alert-ink)}
+.bed.s-watching .head{background:var(--watch-head);color:#5C3A00}
+.bed.s-watching .state{color:var(--watch-ink)}
+.bed.s-unreliable,.bed.s-offline{border:1.5px dashed var(--unrel-line);background:#F8F9FA}
+.bed.s-unreliable .state{color:#4B5563}
+.bed.s-care .state{color:var(--primary)}
+.bed.s-offline .state,.bed.s-ended .state,.bed.s-baseline .state{color:var(--faint)}
+.bed.esc{animation:pulse 1.2s ease-in-out infinite}
+@keyframes pulse{50%{box-shadow:0 0 0 5px rgba(208,52,44,.25)}}
+.legend{display:flex;flex-wrap:wrap;gap:8px 18px;font-size:12px;color:var(--muted);border-top:1px solid var(--line2);padding:12px 20px}
+.legend span{display:flex;align-items:center;gap:6px}
+.feed-mini{display:grid;grid-template-columns:52px 64px 1fr auto;font-size:13px}
+.feed-mini>*{padding:9px 0;border-top:1px solid var(--line2)}
+.detail{position:sticky;top:86px}
+.d-head{padding:18px 20px 14px;border-bottom:1px solid var(--line2)}
+.d-head .row{display:flex;align-items:center;justify-content:space-between}
+.d-head .id{font-size:28px;font-weight:700}
+.d-body{padding:16px 20px;display:flex;flex-direction:column;gap:16px}
+.reason{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
+.reason .big{font-size:30px;font-weight:700;line-height:1;text-align:right}
+.reason .big small{display:block;font-size:11px;font-weight:400;color:var(--faint);margin-top:4px}
+.acts{display:flex;gap:8px}
+.acts .btn{min-height:44px}
+.acts .grow{flex:1}
+.okbox{display:flex;align-items:center;gap:8px;padding:11px 12px;border-radius:10px;background:var(--ok-bg);color:var(--ok-ink);font-weight:600}
+.carebox{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;background:var(--primary-bg);color:var(--primary);font-weight:600}
+.carebox .grow{flex:1}
+.sub-h{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:4px}
+.tl{position:relative;height:10px;border-radius:5px;background:#C9D6E4;margin:4px 0}
+.tl i{position:absolute;top:-1px;width:12px;height:12px;margin-left:-6px;border-radius:50%;box-shadow:0 0 0 2px #fff}
+.ev-mini{display:grid;grid-template-columns:48px 10px 1fr;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--line2);font-size:13px}
 
-  section.feed{margin-top:26px}
-  h2{font-size:13px; color:var(--dim); font-weight:600; margin:0 0 10px;
-     letter-spacing:.5px; text-transform:uppercase}
-  table{width:100%; border-collapse:collapse; font-size:13px}
-  th,td{text-align:left; padding:7px 10px; border-bottom:1px solid var(--line)}
-  th{color:var(--dim); font-weight:500; font-size:11px; letter-spacing:.5px;
-     text-transform:uppercase}
-  td{font-variant-numeric:tabular-nums}
-  tr.slow td:first-child{border-left:3px solid var(--watching)}
-  tr.fast td:first-child{border-left:3px solid var(--alert)}
-  .empty{color:var(--dim); padding:24px; text-align:center}
+/* 事件與告警 */
+.filters{display:flex;flex-wrap:wrap;gap:6px}
+.filters button{min-height:34px;padding:0 14px;border-radius:999px;border:1px solid #D5DAE0;background:#fff;font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px}
+.filters button.on{background:var(--primary);border-color:var(--primary);color:#fff}
+.filters i{opacity:.7;font-style:normal}
+tr.pend td{background:var(--alert-bg)}
+.st-acked{color:#2E7D57;font-weight:600}
+.st-live{font-weight:600}
+.st-info{color:var(--muted)}
 
-  .note{
-    margin-top:24px; padding:12px 14px; border:1px solid var(--line);
-    border-radius:8px; color:var(--dim); font-size:12px; background:#00000020;
-  }
-  .note b{color:var(--text)}
-  @media (max-width:640px){ main{padding:12px} header{padding:12px} }
+/* 紀錄整理 */
+.rec{display:grid;grid-template-columns:300px minmax(0,1fr) 270px;gap:18px;align-items:start}
+.tabs{display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid var(--line2)}
+.tabs button{border:0;background:#FAFBFC;padding:12px 16px;text-align:left;color:var(--muted)}
+.tabs button.on{background:#fff;color:var(--ink);font-weight:700;box-shadow:inset 0 -2px 0 var(--primary)}
+.tabs small{display:block;font-size:12px;font-weight:400;color:var(--muted)}
+.q{width:100%;text-align:left;border:0;border-bottom:1px solid var(--line2);background:#fff;padding:13px 16px;display:grid;grid-template-columns:1fr auto;gap:2px 10px}
+.q.on{background:#EEF4FA;box-shadow:inset 3px 0 0 var(--primary)}
+.q b{font-size:16px}
+.q .st{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600}
+.q .tg{font-size:13px;color:var(--muted)}
+.q .end{font-size:12px;color:var(--faint)}
+.doc-h{padding:18px 22px 14px;border-bottom:1px solid var(--line2);display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:flex-start}
+.doc-h .id{font-size:26px;font-weight:700}
+.doc-b{padding:18px 22px 22px;display:flex;flex-direction:column;gap:18px}
+.headline{margin:0;padding:14px 16px;border-radius:10px;background:var(--soft);font-size:17px;font-weight:600;line-height:1.6;outline:none}
+.headline[contenteditable=true]{background:#fff;box-shadow:inset 0 0 0 2px var(--primary)}
+.headline.wait{color:var(--faint)}
+.sec-t{font-size:12px;font-weight:700;color:var(--muted);margin-bottom:4px}
+.item{display:grid;grid-template-columns:52px auto 1fr auto;gap:12px;align-items:center;padding:10px 0;border-top:1px solid var(--line2)}
+.ref{display:flex;align-items:center;gap:4px;font-size:11px;color:#2E7D57}
+.ref.hb{color:var(--faint)}
+.cmp{display:flex;flex-wrap:wrap;align-items:flex-end;gap:18px;padding:14px 16px;border:1px solid var(--line2);border-radius:10px}
+.cmp .t{flex:1 1 200px}
+.bars{display:flex;align-items:flex-end;gap:12px;height:76px}
+.bars div{display:flex;flex-direction:column;align-items:center;gap:3px;font-size:12px;font-weight:600}
+.bars i{width:24px;border-radius:4px 4px 2px 2px;background:#CBD3DC}
+.bars .cur i{background:var(--primary)}
+.bars small{font-size:11px;color:var(--faint);font-weight:400}
+textarea{font:inherit;width:100%;resize:vertical;border:1px solid #D5DAE0;border-radius:10px;padding:10px 12px;font-size:14px;color:var(--ink)}
+.aside{display:flex;flex-direction:column;gap:14px}
+.aside .card{padding:18px}
+.aside h2{margin:0;font-size:15px}
+.prog{height:6px;border-radius:3px;background:var(--line2);overflow:hidden;margin:10px 0 12px}
+.prog i{display:block;height:100%;background:var(--primary);border-radius:3px}
+.step{display:flex;align-items:flex-start;gap:10px;margin-bottom:10px}
+.step .c{width:22px;height:22px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;font-weight:700;border:2px solid #CBD3DC;background:#fff}
+.step .c.ok{background:var(--ok);border-color:var(--ok)}
+.step .c.bad{background:var(--alert);border-color:var(--alert)}
+.step input{width:20px;height:20px;accent-color:var(--primary);margin:1px}
+.step small{display:block;font-size:12px;color:var(--muted)}
+.step .bad-t{color:var(--alert-ink)}
+.how{display:grid;grid-template-columns:52px 1fr;gap:6px 10px;font-size:13px;margin-top:10px}
+.how span:nth-child(odd){color:var(--muted)}
+.note{font-size:12px;padding:8px 10px;border-radius:8px;background:var(--watch-bg);color:var(--watch-ink);margin-top:10px}
+.signed{padding:11px 12px;border-radius:10px;background:var(--ok-bg);color:var(--ok-ink);font-weight:600}
+
+/* 報表 */
+.rep{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:18px;align-items:start}
+.covbar{width:90px;height:8px;border-radius:4px;background:var(--line2);display:inline-block;vertical-align:middle;margin-right:8px;overflow:hidden}
+.covbar i{display:block;height:100%;background:#5E7FA3}
+.net{padding:18px 20px;display:flex;flex-direction:column;gap:10px}
+.net .zero{font-size:40px;font-weight:700;color:var(--ok-ink);line-height:1}
+.net .row{display:flex;justify-content:space-between;border-top:1px solid var(--line2);padding-top:8px;font-size:13px}
+pre{margin:0;padding:10px 12px;background:var(--navy);color:#C9D1DB;border-radius:10px;font-size:11.5px;white-space:pre-wrap;word-break:break-all}
+
+@media (max-width:1240px){.ward,.rep{grid-template-columns:1fr}.detail{position:static}.rec{grid-template-columns:260px minmax(0,1fr)}.rec .aside{grid-column:1/-1;flex-direction:row;flex-wrap:wrap}.rec .aside .card{flex:1 1 260px}}
+@media (max-width:860px){.app{grid-template-columns:1fr}.side{position:static;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center}.side .grow,.brand small{display:none}.brand{padding:0 8px}.rec{grid-template-columns:1fr}main{padding:16px}}
 </style>
 </head>
 <body>
+<div class="app">
+  <nav class="side" aria-label="主選單">
+    <div class="brand">
+      <svg width="28" height="28" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#1F5C99"/><path d="M6 19h5l2.5-7 4 12 3-8 1.5 3H26" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <div><b>DialySight</b><small>護理站</small></div>
+    </div>
+    <a class="nav" href="#ward" data-v="ward"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>床位總覽</a>
+    <a class="nav" href="#events" data-v="events"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0112 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10 21h4"/></svg>事件與告警<span class="n red" id="n-pending"></span></a>
+    <a class="nav" href="#records" data-v="records"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5M10 13h6M10 17h4"/></svg>紀錄整理<span class="n" id="n-records"></span></a>
+    <a class="nav" href="#report" data-v="report"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>報表與裝置</a>
+    <div class="grow"></div>
+    <button class="side-btn" id="sound" title="新告警時播放提示音（瀏覽器規定要先按一次才能出聲）">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 010 7"/></svg><span id="sound-t">提示音：關</span>
+    </button>
+    <button class="who" id="nurse" title="點一下換護理師（確認告警與簽核時會記下這個名字）">
+      <span class="av" id="nurse-av">A</span><span><b id="nurse-name">護理師 A</b><small>點這裡換人</small></span>
+    </button>
+  </nav>
 
-<header>
-  <h1>DialySight</h1>
-  <span class="sub">護理站總覽</span>
-  <span class="spacer"></span>
-  <span class="pill">線上 <b id="n-online">—</b> 床</span>
-  <span class="pill">今日事件 <b id="n-events">—</b></span>
-  <span class="pill">網路流量 <b id="n-traffic">—</b></span>
-  <span class="pill" id="clock">—</span>
-</header>
+  <div>
+    <header class="top">
+      <h1 id="title">床位總覽</h1>
+      <span class="desc" id="desc"></span>
+      <span class="grow"></span>
+      <span class="demo-tag" id="demo-tag" hidden>示範資料</span>
+      <span class="privacy" title="院內網路上只有床邊送來的文字">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2E7D57" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6l8-3z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>
+        院內網路 0 路影像
+      </span>
+      <span class="clock" id="clock">--:--</span>
+    </header>
 
-<main>
-  <div class="grid" id="grid"></div>
+    <main>
+      <!-- 床位總覽 -->
+      <section class="view" id="v-ward">
+        <div class="stat-line" id="ward-stats"></div>
+        <div class="ward">
+          <div style="display:flex;flex-direction:column;gap:18px;min-width:0">
+            <section class="card">
+              <div class="card-h"><h2>床位</h2><span class="hint">點選床位查看詳情</span></div>
+              <div class="beds" id="beds"></div>
+              <div class="legend">
+                <span><i class="dot" style="background:var(--ok)"></i>穩定</span>
+                <span><i class="dot" style="background:var(--watch)"></i>觀察中（只記錄）</span>
+                <span><i class="dot" style="background:var(--alert)"></i>告警（需處理）</span>
+                <span><i class="dot" style="border:2px solid var(--unrel)"></i>無法判定（看不到）</span>
+                <span><i class="dot" style="background:var(--primary)"></i>照護中（暫停通知）</span>
+              </div>
+            </section>
+            <section class="card">
+              <div class="card-h"><h2>本班事件</h2><a href="#events" style="font-size:13px">全部事件 →</a></div>
+              <div class="feed-mini" id="feed-mini" style="padding:0 20px 6px"></div>
+            </section>
+          </div>
+          <aside class="card detail" id="detail"></aside>
+        </div>
+      </section>
 
-  <section class="feed">
-    <h2>最近事件</h2>
-    <table>
-      <thead>
-        <tr><th>時間</th><th>床位</th><th>事件</th><th>通道</th><th>持續</th><th>峰值</th></tr>
-      </thead>
-      <tbody id="events"><tr><td colspan="6" class="empty">尚無事件</td></tr></tbody>
-    </table>
-  </section>
+      <!-- 事件與告警 -->
+      <section class="view" id="v-events">
+        <div class="kpis" id="ev-kpis"></div>
+        <section class="card">
+          <div class="card-h" style="flex-wrap:wrap;align-items:center">
+            <div class="filters" id="filters"></div>
+            <span class="hint">觀察只記錄、不通知；告警需要確認</span>
+          </div>
+          <div style="overflow-x:auto">
+            <table style="min-width:820px">
+              <thead><tr><th>時間</th><th>床位</th><th>類型</th><th>內容</th><th>通道</th><th>持續</th><th>處理</th></tr></thead>
+              <tbody id="ev-rows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
 
-  <div class="note">
-    <b>這一頁沒有任何影像。</b>
-    所有資料都來自床邊送過來的文字 payload（每筆約 180 bytes）。
-    影像在床邊處理完就不再離開 —— 院內網路上不存在病患影像串流。
-    <span id="traffic-detail"></span>
+      <!-- 紀錄整理 -->
+      <section class="view" id="v-records">
+        <div class="rec">
+          <section class="card" style="overflow:hidden">
+            <div class="tabs">
+              <button id="tab-pending" onclick="setTab('pending')">待審閱<small id="c-pending">0 份</small></button>
+              <button id="tab-signed" onclick="setTab('signed')">已簽核<small id="c-signed">0 份</small></button>
+            </div>
+            <div id="queue"></div>
+          </section>
+          <article class="card" id="doc" style="overflow:hidden"></article>
+          <div class="aside" id="rec-aside"></div>
+        </div>
+      </section>
+
+      <!-- 報表與裝置 -->
+      <section class="view" id="v-report">
+        <div class="kpis" id="rp-kpis"></div>
+        <div class="rep">
+          <section class="card" style="overflow:hidden">
+            <div class="card-h"><h2>各床狀態</h2><span class="hint" id="rp-since"></span></div>
+            <div style="overflow-x:auto">
+              <table style="min-width:720px">
+                <thead><tr><th>床位</th><th>連線</th><th>治療時間</th><th>告警</th><th>觀察</th><th>無法判定</th><th>有效監測</th><th>可見度</th></tr></thead>
+                <tbody id="rp-rows"></tbody>
+              </table>
+            </div>
+          </section>
+          <div style="display:flex;flex-direction:column;gap:18px">
+            <section class="card">
+              <div class="card-h"><h2>院內網路上傳了什麼</h2></div>
+              <div class="net" id="rp-net"></div>
+            </section>
+            <section class="card">
+              <div class="card-h"><h2>AI 草稿（Hailo LLM）</h2></div>
+              <div class="net" id="rp-llm"></div>
+            </section>
+          </div>
+        </div>
+      </section>
+    </main>
   </div>
-</main>
+</div>
+<div class="toast" id="toast"></div>
 
 <script>
-const FEATURE_LABEL = {
-  arm_displacement: "上肢姿態異常",
-  torso_angle:      "軀幹角度變化",
-  arm_depth_delta:  "深度方向位移",
-  bed_occupancy:    "離床偵測",
-  roi_redness:      "穿刺處滲血疑慮",
-};
-const STATE_LABEL = {
-  normal:"NORMAL", watching:"WATCHING", alert:"ALERT",
-  cooldown:"COOLDOWN", unknown:"—",
-  baseline:"建立基準",
-  // ★ 寫「無法判定」而不是任何聽起來像沒事的字。
-  //   把「不知道」顯示成「正常」是監測系統最危險的失效模式。
-  unreliable:"無法判定",
-  ended:"已結束",
-};
+// ===================================================================
+// 小工具
+// ===================================================================
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const bedName = b => String(b ?? "").replace(/^bed\s*(\d+)$/i, (_, n) => "Bed " + n.padStart(2, "0"));
+const num = (v, d = 2) => v == null ? "—" : Number(v).toFixed(d);
+const mmss = s => { s = Math.max(0, Math.round(s || 0)); const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = s % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : String(m).padStart(2, "0")) + ":" + String(x).padStart(2, "0"); };
+const hm = t => t ? new Date(t * 1000).toLocaleTimeString("zh-TW", {hour: "2-digit", minute: "2-digit", hour12: false}) : "—";
+const dur = s => s == null ? "—" : s >= 3600 ? `${Math.floor(s / 3600)}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}` : `0:${String(Math.floor(s / 60)).padStart(2, "0")}`;
+const fmtBytes = n => n == null ? "—" : n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : (n / 1048576).toFixed(2) + " MB";
+const CHECK = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>`;
+function toast(msg){ const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove("show"), 2400); }
+async function post(url, body){ const r = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)}); return r.json(); }
+const getJSON = url => fetch(url).then(r => r.json());
 
-const fmtTime = iso => {
-  if(!iso) return "—";
-  try { return new Date(iso).toLocaleTimeString("zh-TW",{hour12:false}); }
-  catch { return iso; }
+// ===================================================================
+// 頁面切換
+// ===================================================================
+const VIEWS = {
+  ward:    ["床位總覽", "哪一床要處理？紅色卡片按「確認處理」；要到床邊處理按「照護中」暫停通知。"],
+  events:  ["事件與告警", "這一班發生的所有事件。觀察只記錄、不通知；告警需要確認。"],
+  records: ["紀錄整理", "治療結束後自動起草摘要，護理師補充、核對後簽核才寫入。"],
+  report:  ["報表與裝置", "本班統計、各床連線狀態，以及院內網路上實際傳輸的內容。"],
 };
-const fmtBytes = n => {
-  if(n == null) return "—";
-  if(n < 1024) return n + " B";
-  if(n < 1048576) return (n/1024).toFixed(1) + " KB";
-  return (n/1048576).toFixed(2) + " MB";
+let view = "ward";
+function route(){
+  const v = (location.hash || "#ward").slice(1);
+  view = VIEWS[v] ? v : "ward";
+  document.querySelectorAll(".view").forEach(el => el.classList.toggle("on", el.id === "v-" + view));
+  document.querySelectorAll(".nav").forEach(el => el.classList.toggle("on", el.dataset.v === view));
+  $("title").textContent = VIEWS[view][0]; $("desc").textContent = VIEWS[view][1];
+  if (view === "records") loadRecords();
+  if (view === "report") refreshReport();
+  render();
+}
+window.addEventListener("hashchange", route);
+
+// ===================================================================
+// 護理師與提示音（只存在這台瀏覽器）
+// ===================================================================
+let nurse = localStorage.getItem("ds_nurse") || "護理師 A";
+function renderNurse(){ $("nurse-name").textContent = nurse; $("nurse-av").textContent = nurse.replace(/^護理師\s*/, "").slice(0, 1) || "護"; }
+$("nurse").onclick = () => {
+  const v = prompt("目前值班的護理師（確認告警、簽核時會記下這個名字）", nurse);
+  if (v && v.trim()) { nurse = v.trim().slice(0, 20); localStorage.setItem("ds_nurse", nurse); renderNurse(); }
 };
+renderNurse();
 
-function bedCard(b){
-  const state = b.online ? (b.state || "unknown") : "offline";
-  const cls   = b.online ? (b.state || "unknown") : "offline";
-  const vis   = b.visibility == null ? null : Math.round(b.visibility * 100);
-
-  const warnBaseline = b.online && b.baseline_ready === false;
-  const warnSubject  = b.online && b.subject_found === false;
-
-  return `
-  <div class="bed ${cls}">
-    <div class="bed-head">
-      <span class="bed-id">${b.bed}</span>
-      <span class="state ${cls}">${b.online ? (STATE_LABEL[state]||state) : "OFFLINE"}</span>
-    </div>
-    <div class="rows">
-      <div class="row"><span>事件數</span><b>${b.events ?? 0}</b></div>
-      <div class="row"><span>偏離量</span><b>${b.value == null ? "—" : b.value.toFixed(4)}</b></div>
-      <div class="row ${warnSubject ? "warn" : ""}">
-        <span>病人辨識</span><b>${b.online ? (b.subject_found === false ? "未偵測" : "正常") : "—"}</b>
-      </div>
-      ${warnBaseline ? '<div class="row warn"><span>基準線</span><b>建立中</b></div>' : ""}
-      ${state === "unreliable" ? '<div class="row" style="color:var(--unreliable)"><span>遮蔽</span><b>訊號不足，無法判定</b></div>' : ""}
-      ${b.open_at_end ? '<div class="row" style="color:var(--alert)"><span>床次結束</span><b>結束時仍在告警</b></div>' : ""}
-      ${!b.online ? `<div class="row"><span>最後回報</span><b>${b.age_s}s 前</b></div>` : ""}
-    </div>
-    ${vis == null ? "" : `<div class="meter"><i style="width:${vis}%"></i></div>`}
-  </div>`;
+let soundOn = localStorage.getItem("ds_sound") === "1", audio = null;
+function renderSound(){ $("sound").classList.toggle("on", soundOn); $("sound-t").textContent = soundOn ? "提示音：開" : "提示音：關"; }
+$("sound").onclick = () => { soundOn = !soundOn; localStorage.setItem("ds_sound", soundOn ? "1" : "0"); renderSound(); if (soundOn) chime(); };
+renderSound();
+function chime(urgent){
+  if (!soundOn) return;
+  try {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    (urgent ? [880, 660, 880, 660] : [880, 660]).forEach((f, i) => {
+      const o = audio.createOscillator(), g = audio.createGain(), t = audio.currentTime + i * 0.18;
+      o.type = "sine"; o.frequency.value = f; o.connect(g); g.connect(audio.destination);
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.18, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16); o.start(t); o.stop(t + 0.17);
+    });
+  } catch {}
 }
 
-function eventRow(e){
-  return `<tr class="${e.channel || ""}">
-    <td>${fmtTime(e.ts)}</td>
-    <td>${e.bed || "—"}</td>
-    <td>${FEATURE_LABEL[e.feature] || e.feature || "—"}</td>
-    <td>${e.channel === "fast" ? "快通道" : "慢通道"}</td>
-    <td>${e.duration == null ? "—" : e.duration + " s"}</td>
-    <td>${e.peak == null ? "—" : e.peak}</td>
-  </tr>`;
-}
+// ===================================================================
+// 護理站操作
+// ===================================================================
+async function ack(bed){ const r = await post("/api/ack", {bed, nurse}); toast(r.ok ? `${bedName(bed)} 已確認（${r.after_s} 秒）` : r.error); refresh(); }
+async function care(bed){ const r = await post("/api/pause", {bed, minutes: 10, nurse}); if (r.ok) toast(`${bedName(bed)} 照護中：暫停通知 10 分鐘，床邊仍持續記錄`); refresh(); }
+async function resume(bed){ await post("/api/resume", {bed}); toast(`${bedName(bed)} 已恢復通知`); refresh(); }
 
+// ===================================================================
+// 資料輪詢
+// ===================================================================
+let S = {beds: [], enter: .15, now: Date.now() / 1000}, LOG = [], selected = null;
+let lastPending = new Set(), lastUrgent = 0;
 async function refresh(){
-  try{
-    const [state, events, stats] = await Promise.all([
-      fetch("/api/state").then(r => r.json()),
-      fetch("/api/events").then(r => r.json()),
-      fetch("/api/stats").then(r => r.json()),
-    ]);
+  try { [S, LOG] = await Promise.all([getJSON("/api/state"), getJSON("/api/events")]); }
+  catch { $("clock").textContent = "連線中斷"; return; }
+  const pend = S.beds.filter(b => b.pending);
+  $("n-pending").textContent = pend.length || "";
+  $("n-records").textContent = S.records_pending || "";
+  $("demo-tag").hidden = !S.demo;
+  $("clock").textContent = new Date().toLocaleTimeString("zh-TW", {hour: "2-digit", minute: "2-digit", hour12: false});
+  document.title = (pend.length ? `(${pend.length}) 待處理告警 · ` : "") + "DialySight 護理站";
+  // 新告警響一次；有人超過時限沒確認，每 20 秒再響
+  const now = Date.now(), fresh = pend.filter(b => !lastPending.has(b.bed));
+  if (fresh.length) { chime(false); if (!selected || !pend.some(b => b.bed === selected)) selected = fresh[0].bed; }
+  else if (pend.some(b => b.pending.escalated) && now - lastUrgent > 20000) { chime(true); lastUrgent = now; }
+  lastPending = new Set(pend.map(b => b.bed));
+  render();
+  if (view === "report") refreshReport();
+  // 有新的床次結束：紀錄整理的清單跟著更新（正在編輯時不打斷）
+  if (view === "records" && S.records_pending !== lastRecPending && !editing) loadRecords(cur);
+  lastRecPending = S.records_pending;
+}
+let lastRecPending = null;
+function render(){ if (view === "ward") renderWard(); else if (view === "events") renderEvents(); }
 
-    const beds = state.beds || [];
-    document.getElementById("grid").innerHTML =
-      beds.length ? beds.map(bedCard).join("")
-                  : '<div class="empty">尚未有床邊主機連線</div>';
+// ===================================================================
+// 床位總覽
+// ===================================================================
+const KIND = {   // 事件類型的顏色與文字（三個畫面共用）
+  alert: {label: "告警", cls: "k-alert", c: "var(--alert)"},
+  watch: {label: "觀察", cls: "k-watch", c: "var(--watch)"},
+  unrel: {label: "無法判定", cls: "k-unrel", c: "var(--unrel)"},
+  care:  {label: "照護中", cls: "k-care", c: "var(--primary)"},
+};
 
-    document.getElementById("n-online").textContent =
-      beds.filter(b => b.online).length;
-    document.getElementById("n-events").textContent = stats.events ?? 0;
-    document.getElementById("n-traffic").textContent =
-      (stats.kbps ?? 0).toFixed(3) + " kbps";
-    document.getElementById("clock").textContent = fmtTime(state.server_time);
+function bedInfo(b){
+  const d = b.display, p = b.pending, enter = S.enter;
+  const fast = (p && p.channel) === "fast";
+  const I = {cls: "s-" + d, dot: "var(--ok)", head: b.start ? hm(b.start) + " 上機" : "", state: "", line: "", big: num(b.value), bigC: "var(--ink)",
+             reason: "", reason2: "", spark: true, color: "#5E7FA3"};
+  if (d === "alert" && p) {
+    Object.assign(I, {dot: "var(--alert)", head: mmss(p.since_s) + " 未確認", state: "告警 · 需處理", color: "#D0342C", bigC: "var(--alert-ink)",
+      line: fast ? "突然移動 · 快通道" : `手臂偏離 ${num(p.peak ?? b.value)} · ${mmss(b.state_since_s)}`,
+      reason: fast ? "突然移動（快通道）" : "手臂偏離基準，越過門檻",
+      reason2: `${p.count > 1 ? `共 ${p.count} 筆 · ` : ""}峰值 ${num(p.peak)}${b.state !== "alert" ? " · 床邊已自行解除" : ` · 已持續 ${mmss(b.state_since_s)}`}`});
+  } else if (d === "alert") {
+    Object.assign(I, {cls: "s-acked", dot: "var(--alert)", state: "告警 · 已確認", color: "#D0342C", bigC: "var(--alert-ink)",
+      line: `手臂偏離 ${num(b.value)} · ${mmss(b.state_since_s)}`, reason: "已確認，床邊仍在告警中", reason2: `已持續 ${mmss(b.state_since_s)}`});
+  } else if (d === "watching") {
+    Object.assign(I, {dot: "var(--watch)", state: "觀察中", color: "#E39A12", bigC: "var(--watch-ink)",
+      line: `手臂偏離 ${num(b.value)} · 觀察 ${mmss(b.state_since_s)}`, reason: "偏離接近門檻，只記錄、尚未通知",
+      reason2: `越過門檻 ${num(enter)} 並持續 5 秒才會通知`});
+  } else if (d === "unreliable") {
+    Object.assign(I, {dot: "transparent", state: "無法判定", color: "#9AA3AE", big: "—", bigC: "var(--faint)",
+      line: `看不到穿刺側手臂 · ${mmss(b.state_since_s)}`, reason: "看不到穿刺側手臂",
+      reason2: `可見度 ${num(b.visibility)} · 不是「正常」，是「看不到」· 建議目視確認`});
+  } else if (d === "care") {
+    Object.assign(I, {dot: "var(--primary)", state: "照護中", color: "#9AA3AE", big: "—", bigC: "var(--faint)",
+      line: `${b.pause.by} 在床邊 · 剩 ${mmss(b.pause.remaining_s)}`, reason: "照護中，暫停通知",
+      reason2: `${b.pause.by} 啟動 · ${mmss(b.pause.remaining_s)} 後自動恢復 · 床邊仍持續記錄`});
+  } else if (d === "baseline") {
+    Object.assign(I, {dot: "#B8C4D3", state: "建立基準", big: "—", bigC: "var(--faint)", spark: false,
+      line: "學習這位病人的靜止姿態", reason: "建立個人基準中", reason2: "約 30 秒，完成後自動開始監測"});
+  } else if (d === "offline") {
+    Object.assign(I, {dot: "#B8BFC8", state: "離線", big: "—", bigC: "var(--faint)", spark: false, head: "",
+      line: `最後回報 ${mmss(b.age_s)} 前`, reason: "床邊主機沒有回應", reason2: "這床目前沒有在監測，請確認床邊主機"});
+  } else if (d === "ended") {
+    Object.assign(I, {dot: "#B8BFC8", state: "治療結束", big: "—", bigC: "var(--faint)", spark: false, head: "",
+      line: b.open_at_end ? "⚠ 結束時仍在告警中" : "草稿已送到紀錄整理", reason: "治療已結束",
+      reason2: b.open_at_end ? "結束時仍在告警中，請到紀錄整理確認" : "請到「紀錄整理」審閱並簽核"});
+  } else {
+    Object.assign(I, {state: "穩定", line: `治療 ${dur(b.uptime)} · 偏離 ${num(b.value)}`, reason: "姿態穩定",
+      reason2: `偏離基準 ${num(b.value)}，距門檻還有 ${num(Math.max(0, enter - (b.value || 0)))}`});
+  }
+  return I;
+}
 
-    const tb = document.getElementById("events");
-    const real = (events || []).filter(e => e.type !== "status");
-    tb.innerHTML = real.length ? real.map(eventRow).join("")
-                              : '<tr><td colspan="6" class="empty">尚無事件</td></tr>';
+function sparkSVG(values, color, W, H, withLabel){
+  const enter = S.enter, vals = (values || []).map(v => v == null ? null : Number(v));
+  const fin = vals.filter(v => v != null);
+  const max = Math.max(enter * 1.6, ...fin.map(v => v * 1.15), 0.05);
+  const n = Math.max(vals.length, 2), X = i => (i / (n - 1)) * W, Y = v => H - 3 - Math.min(1, v / max) * (H - 6);
+  let d = "", seg = [];
+  const flush = () => { if (seg.length > 1) d += "M" + seg.join("L"); seg = []; };
+  vals.forEach((v, i) => { if (v == null) flush(); else seg.push(X(i).toFixed(1) + "," + Y(v).toFixed(1)); });
+  flush();
+  const ey = Y(enter).toFixed(1);
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+    <line x1="0" x2="${W}" y1="${ey}" y2="${ey}" stroke="${withLabel ? "#D0342C" : "#C3C9D1"}" stroke-opacity="${withLabel ? .55 : 1}" stroke-dasharray="4 4" vector-effect="non-scaling-stroke"/>
+    ${withLabel ? `<text x="${W - 6}" y="${ey - 5}" text-anchor="end" font-size="10" fill="#B02A23">門檻 ${num(enter)}</text>` : ""}
+    <path d="${d}" fill="none" stroke="${color}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
+  </svg>`;
+}
 
-    document.getElementById("traffic-detail").innerHTML =
-      `目前累計 <b>${fmtBytes(stats.bytes_total)}</b>，`
-      + `平均每筆 <b>${stats.bytes_mean_per_message} bytes</b>，`
-      + `換算 <b>${(stats.kbps ?? 0).toFixed(3)} kbps</b>。`
-      + `對照：單路 1080p 串流約 4 Mbps。`;
-  }catch(e){
-    document.getElementById("clock").textContent = "連線中斷";
+function renderWard(){
+  const beds = S.beds || [];
+  const live = beds.filter(b => b.online && b.display !== "ended");
+  const c = k => beds.filter(b => b.display === k).length;
+  const pend = beds.filter(b => b.pending).length;
+  $("ward-stats").innerHTML = `
+    <span>監測中 <b>${live.filter(b => b.display !== "care").length}</b> / ${beds.filter(b => b.display !== "ended").length} 床</span>
+    <span>需處理 <b style="color:var(--alert)">${pend}</b></span>
+    <span>觀察中 <b style="color:var(--watch-ink)">${c("watching")}</b></span>
+    <span>無法判定 <b style="color:#4B5563">${c("unreliable")}</b></span>
+    <span>照護中 <b style="color:var(--primary)">${c("care")}</b></span>
+    ${c("offline") ? `<span>離線 <b>${c("offline")}</b></span>` : ""}`;
+
+  if (!beds.length) {
+    $("beds").innerHTML = `<div class="empty" style="grid-column:1/-1;text-align:left;line-height:1.9">
+      還沒有床邊主機連進來。<br>
+      ・同一台電腦：直接執行 <code>python scripts/run_demo.py --video data/clips/clip_03_gradual_drift.mp4 --show</code>，這裡就會出現 Bed 07<br>
+      ・別台電腦：把床邊 config 的 <code>sink.http</code> 改成這台電腦的網址（護理站啟動時有印出來）<br>
+      ・想先看畫面：用 <code>python scripts/nurse_station.py --demo</code> 啟動</div>`;
+    $("detail").innerHTML = `<div class="empty">選一床查看詳情</div>`;
+    $("feed-mini").innerHTML = "";
+    return;
+  }
+  if (!selected || !beds.some(b => b.bed === selected)) selected = (beds.find(b => b.pending) || beds[0]).bed;
+  $("beds").innerHTML = beds.map(b => {
+    const I = bedInfo(b);
+    return `<button class="bed ${I.cls}${b.bed === selected ? " sel" : ""}${b.pending && b.pending.escalated ? " esc" : ""}" onclick="pick('${esc(b.bed)}')" aria-pressed="${b.bed === selected}">
+      <span class="head"><b>${esc(bedName(b.bed))}</b><span>${esc(I.head)}</span></span>
+      <span class="body">
+        <span class="state"><i class="dot" style="background:${I.dot};${I.dot === "transparent" ? "border:2px solid var(--unrel)" : ""}"></i>${esc(I.state)}</span>
+        <span class="line">${esc(I.line)}</span>
+        ${I.spark && b.spark && b.spark.length > 1 ? sparkSVG(b.spark.slice(-72), I.color, 160, 26, false) : ""}
+      </span>
+    </button>`;
+  }).join("");
+
+  const recent = LOG.slice(0, 4);
+  $("feed-mini").innerHTML = recent.length ? recent.map(r => `
+    <span>${hm(r.t)}</span><b>${esc(bedName(r.bed))}</b><span>${esc(r.text)}</span>
+    <span class="st-${r.status === "pending" ? "live" : r.status}" style="${r.status === "pending" ? "color:var(--alert)" : ""}">${esc(r.status_text)}</span>`).join("")
+    : `<span style="grid-column:1/-1;color:var(--muted)">這一班還沒有事件</span>`;
+  renderDetail(beds.find(b => b.bed === selected));
+}
+function pick(bed){ selected = bed; renderWard(); }
+
+function renderDetail(b){
+  const I = bedInfo(b), p = b.pending, d = b.display;
+  const chipCls = {alert: "k-alert", watching: "k-watch", unreliable: "k-unrel", care: "k-care", normal: "k-ok"}[d] || "k-grey";
+  let acts = "";
+  if (p) acts = `<div class="acts"><button class="btn danger grow" onclick="ack('${esc(b.bed)}')">確認處理 · ${mmss(p.since_s)}</button>
+      <button class="btn" onclick="care('${esc(b.bed)}')" title="到床邊處理時暫停通知 10 分鐘">照護中</button></div>
+      ${p.escalated ? `<div class="hint" style="color:var(--alert-ink);margin-top:-8px">超過 ${S.escalate_after_s} 秒未確認，提示音會每 20 秒重複</div>` : ""}`;
+  else if (b.ack) acts = `<div class="okbox">${CHECK}${esc(b.ack.by)} 已確認 · 回應 ${b.ack.after_s} 秒</div>`;
+  if (d === "care") acts += `<div class="carebox"><span class="grow">剩 ${mmss(b.pause.remaining_s)} 自動恢復通知</span><button class="btn sm" onclick="resume('${esc(b.bed)}')">提前恢復</button></div>`;
+  else if (!p && b.online && !["ended", "offline"].includes(d))
+    acts += `<div class="acts"><button class="btn grow" onclick="care('${esc(b.bed)}')">照護中 · 暫停通知 10 分鐘</button></div>`;
+
+  const mine = LOG.filter(r => r.bed === b.bed && r.session === b.session);
+  const span = b.start ? Math.max(1, S.now - b.start) : null;
+  const marks = span ? mine.filter(r => r.t >= b.start).map(r =>
+    `<i style="left:${Math.min(100, (r.t - b.start) / span * 100).toFixed(1)}%;background:${KIND[r.kind].c}" title="${hm(r.t)} ${esc(KIND[r.kind].label)}"></i>`).join("") : "";
+  const trend = I.spark && b.spark && b.spark.length > 1;
+  $("detail").innerHTML = `
+    <div class="d-head">
+      <div class="row"><span class="id">${esc(bedName(b.bed))}</span><span class="chip ${chipCls}">${esc(I.state)}</span></div>
+      <div class="hint">${b.start ? `${hm(b.start)} 上機 · 治療 ${dur(b.uptime)}` : ""}${b.online ? ` · 心跳 ${Math.round(b.age_s)} 秒前` : ""}</div>
+    </div>
+    <div class="d-body">
+      <div class="reason">
+        <div><div style="font-weight:700;font-size:16px">${esc(I.reason)}</div><div class="hint">${esc(I.reason2)}</div></div>
+        <div class="big" style="color:${I.bigC}">${I.big}<small>手臂偏離 · 門檻 ${num(S.enter)}</small></div>
+      </div>
+      ${acts}
+      ${trend ? `<div><div class="sub-h"><span>最近 15 分鐘</span><span>虛線 = 告警門檻</span></div>
+        <div style="background:#FAFBFC;border-radius:8px;height:110px">${sparkSVG(b.spark, I.color, 360, 110, true).replace("<svg ", '<svg style="width:100%;height:110px;display:block" ')}</div></div>` : ""}
+      ${span ? `<div><div class="sub-h"><span>本次治療</span><span>${hm(b.start)} → 現在</span></div><div class="tl">${marks}</div></div>` : ""}
+      <div>
+        <div class="sub-h"><span>這床的事件</span><a href="#events">全部事件 →</a></div>
+        ${mine.length ? mine.slice(0, 6).map(r => `<div class="ev-mini"><span>${hm(r.t)}</span><i class="dot" style="background:${KIND[r.kind].c}"></i><span>${esc(KIND[r.kind].label)} · ${esc(r.text)}</span></div>`).join("")
+          : `<div class="ev-mini" style="grid-template-columns:1fr;color:var(--muted)">本次治療目前沒有事件</div>`}
+      </div>
+    </div>`;
+}
+
+// ===================================================================
+// 事件與告警
+// ===================================================================
+let evFilter = "all";
+function setFilter(f){ evFilter = f; renderEvents(); }
+function renderEvents(){
+  const alerts = LOG.filter(r => r.kind === "alert");
+  const pend = alerts.filter(r => r.status === "pending");
+  const acked = alerts.filter(r => r.status === "acked").map(r => Number((r.status_text.match(/(\d+) 秒$/) || [])[1])).filter(x => !isNaN(x));
+  const quiet = LOG.filter(r => r.kind === "watch" && r.status === "info").length;
+  $("ev-kpis").innerHTML = `
+    <div class="kpi ${pend.length ? "hot" : ""}"><div class="l">未確認告警</div><div class="v">${pend.length}</div><div class="s">超過 ${S.escalate_after_s ?? 60} 秒會升級提醒</div></div>
+    <div class="kpi"><div class="l">本班告警</div><div class="v">${alerts.length}</div><div class="s">慢通道 ${alerts.filter(r => r.channel === "慢通道").length} · 快通道 ${alerts.filter(r => r.channel === "快通道").length}</div></div>
+    <div class="kpi"><div class="l">平均回應時間</div><div class="v">${acked.length ? Math.round(acked.reduce((a, b) => a + b, 0) / acked.length) + "<small>秒</small>" : "—"}</div><div class="s">從告警到護理師確認</div></div>
+    <div class="kpi"><div class="l">觀察後未升級</div><div class="v">${quiet}</div><div class="s">只記錄，沒有打擾護理師</div></div>`;
+  const F = [["all", "全部", "var(--ink)"], ["alert", "告警", "var(--alert)"], ["watch", "觀察", "var(--watch)"], ["unrel", "無法判定", "transparent"], ["care", "照護中", "var(--primary)"]];
+  $("filters").innerHTML = F.map(([k, label, c]) => `<button class="${evFilter === k ? "on" : ""}" onclick="setFilter('${k}')" aria-pressed="${evFilter === k}">
+    <span class="dot" style="background:${c};${c === "transparent" ? "border:1.5px solid var(--unrel)" : ""}"></span>${label} <i>${LOG.filter(r => k === "all" || r.kind === k).length}</i></button>`).join("");
+  const rows = LOG.filter(r => evFilter === "all" || r.kind === evFilter);
+  $("ev-rows").innerHTML = rows.length ? rows.map(r => `
+    <tr class="${r.status === "pending" ? "pend" : ""}">
+      <td style="font-weight:600">${hm(r.t)}</td><td style="font-weight:700">${esc(bedName(r.bed))}</td>
+      <td><span class="chip ${KIND[r.kind].cls}">${KIND[r.kind].label}</span></td>
+      <td>${esc(r.text)}</td><td class="muted">${esc(r.channel)}</td><td class="muted">${esc(r.dur || "—")}</td>
+      <td>${r.status === "pending" ? `<button class="btn danger sm" onclick="ack('${esc(r.bed)}')">確認</button>` : `<span class="st-${r.status}">${esc(r.status_text)}</span>`}</td>
+    </tr>`).join("") : `<tr><td colspan="7" class="empty">${evFilter === "all" ? "這一班還沒有事件" : "沒有這一類事件"}</td></tr>`;
+}
+
+// ===================================================================
+// 紀錄整理
+// ===================================================================
+const NUM_RE = /\d{1,2}:\d{2}|\d+(?:\.\d+)?/g;
+let recs = [], recTab = "pending", cur = null, draft = null, editing = false, supp = {}, pollT = null;
+
+async function loadRecords(selectId){
+  recs = await getJSON("/api/records");
+  const n = st => recs.filter(r => r.status === st).length;
+  $("c-pending").textContent = n("pending") + " 份"; $("c-signed").textContent = n("signed") + " 份";
+  if (selectId) { cur = selectId; recTab = (recs.find(r => r.session === cur) || {}).status || recTab; }
+  const list = recs.filter(r => r.status === recTab);
+  if (!cur || !recs.some(r => r.session === cur)) cur = (list[0] || recs[0] || {}).session || null;
+  renderQueue();
+  if (cur) await loadDraft(cur);
+  else {
+    $("doc").innerHTML = `<div class="empty" style="line-height:1.9">還沒有治療結束的床次。<br>床邊跑完一段影片（或治療結束）時會送出結束訊號，這裡就會自動出現一份草稿。<br>想先看畫面：用 <code>python scripts/nurse_station.py --demo</code> 啟動。</div>`;
+    $("rec-aside").innerHTML = "";
   }
 }
+function setTab(t){ recTab = t; const first = recs.find(r => r.status === t); if (first) { cur = first.session; editing = false; loadDraft(cur); } renderQueue(); }
+function renderQueue(){
+  $("tab-pending").classList.toggle("on", recTab === "pending"); $("tab-signed").classList.toggle("on", recTab === "signed");
+  const list = recs.filter(r => r.status === recTab);
+  $("queue").innerHTML = list.length ? list.map(r => `
+    <button class="q ${r.session === cur ? "on" : ""}" onclick="openRec('${esc(r.session)}')">
+      <b>${esc(bedName(r.bed))}</b>
+      <span class="st" style="color:${r.status === "signed" ? "var(--ok-ink)" : "var(--watch-ink)"}"><i class="dot" style="width:7px;height:7px;background:${r.status === "signed" ? "var(--ok)" : "var(--watch)"}"></i>${r.status === "signed" ? "已簽核" : "待審閱"}</span>
+      <span class="tg">${esc(r.chips.join(" · "))}</span><span class="end">${esc(r.date)} ${esc(r.end_hm)} 結束</span>
+    </button>`).join("") : `<div class="empty">${recTab === "pending" ? "沒有待審閱的草稿" : "還沒有簽核的紀錄"}</div>`;
+}
+async function openRec(id){ cur = id; editing = false; renderQueue(); await loadDraft(id); }
 
+async function loadDraft(id){
+  clearTimeout(pollT);
+  const keep = editing && $("headline") ? $("headline").innerText : null;
+  const keepSupp = $("supp") ? $("supp").value : null;
+  draft = await getJSON("/api/records/" + encodeURIComponent(id));
+  renderDraft();
+  if (keep != null) { $("headline").innerText = keep; }
+  if (keepSupp != null && $("supp") && !draft.signed) $("supp").value = keepSupp;
+  check();
+  if (draft.llm && draft.llm.status === "running" && view === "records" && cur === id) pollT = setTimeout(() => loadDraft(id), 1500);
+}
+
+function renderDraft(){
+  const d = draft, signed = d.signed, llm = d.llm || {status: "off"};
+  const running = llm.status === "running";
+  const chip = signed ? `<span class="chip k-ok">已簽核</span>`
+    : llm.status === "ok" ? `<span class="chip k-care">✦ AI 草稿</span>`
+    : running ? `<span class="chip k-watch">AI 起草中…</span>`
+    : `<span class="chip k-grey">範本草稿</span>`;
+  const items = d.items.length ? d.items.map(it => {
+    const k = {alert: "alert", fast: "alert", watch: "watch", unreliable: "unrel"}[it.kind] || "care";
+    return `<div class="item"><b>${esc(it.time)}</b><span class="chip ${KIND[k].cls}">${esc(it.tag)}</span><span>${esc(it.text)}</span>
+      <span class="ref ${it.ref.startsWith("#") ? "" : "hb"}" title="${it.ref.startsWith("#") ? "對應護理站收到的事件編號" : "由床邊心跳推得"}">${it.ref.startsWith("#") ? CHECK : ""}${esc(it.ref)}</span></div>`;
+  }).join("") : `<div class="item" style="grid-template-columns:1fr;color:var(--muted)">這次治療沒有需要列出的事件</div>`;
+  const maxA = Math.max(1, ...d.history.map(h => h.alerts));
+  const bars = d.history.map(h => `<div class="${h.current ? "cur" : ""}">${h.alerts}<i style="height:${Math.max(4, h.alerts / maxA * 44)}px"></i><small>${esc(h.label)}</small></div>`).join("");
+  const text = signed ? signed.summary : d.headline;
+  $("doc").innerHTML = `
+    <div class="doc-h">
+      <div><div class="id">${esc(bedName(d.bed))}</div><div class="hint">${esc(d.date)} · ${esc(d.start_hm)}–${esc(d.end_hm)} · 治療 ${esc(d.duration_text)}</div></div>
+      <div style="display:flex;gap:8px;align-items:center">${chip}${signed || running ? "" : `<button class="btn sm" onclick="regen()" title="依目前的事件紀錄重新產生">↻ 重新產生</button>`}</div>
+    </div>
+    <div class="doc-b">
+      <p class="headline ${running ? "wait" : ""}" id="headline" contenteditable="${editing && !signed}" oninput="check()">${esc(text)}</p>
+      <div><div class="sec-t">重點事件 · ${d.items.length} 筆</div>${items}</div>
+      <div class="cmp"><div class="t"><div class="sec-t">${d.history.length > 1 ? `與前 ${d.history.length - 1} 次治療比較` : "與先前治療比較"} · 告警次數</div><b>${esc(d.history_text)}</b></div><div class="bars">${bars}</div></div>
+      <label><div class="sec-t">護理師補充（處置、病人主訴 —— 攝影機看不到的部分）</div>
+        <textarea id="supp" rows="3" ${signed ? "readonly" : ""} oninput="suppTyped()" placeholder="例：重新固定右手針具與膠帶；病人表示右手發麻">${esc(signed ? [signed.actions, signed.complaint].filter(Boolean).join("\n") : "")}</textarea></label>
+    </div>`;
+
+  const how = llm.status === "off"
+    ? `<span>方法</span><span>範本填空（程式產生）</span><span>輸入</span><span>${d.meta.inputs} 筆事件文字，沒有影像</span><span>保護</span><span>每個數字都對得回事件紀錄</span>`
+    : `<span>模型</span><span>${esc(llm.model || "auto")}</span><span>位置</span><span>hailo-ollama · Hailo-10H，不連外網</span><span>輸入</span><span>${d.meta.inputs} 筆事件文字，沒有影像</span><span>保護</span><span>數字對不上就整份退回範本</span>`;
+  const llmNote = llm.status === "fallback" ? `<div class="note">這次 AI 草稿沒有採用：${esc(llm.reason)}。已改用範本。</div>`
+    : llm.status === "off" ? `<div class="hint" style="margin-top:10px">想讓 AI 改寫得更通順：護理站啟動時加 <code>--llm http://localhost:8000</code>（見 docs/USAGE.md）</div>`
+    : llm.status === "ok" ? `<div class="hint" style="margin-top:10px">AI 改寫花了 ${(llm.ms / 1000).toFixed(1)} 秒，每個數字都已核對。</div>` : "";
+  $("rec-aside").innerHTML = `
+    <section class="card">
+      <div style="display:flex;justify-content:space-between;align-items:baseline"><h2>簽核前檢查</h2><span class="hint" id="steps-n"></span></div>
+      <div class="prog"><i id="steps-bar"></i></div>
+      <div class="step"><span class="c" id="s1c">1</span><div><span id="s1t">事實核對</span><small id="s1s">自動檢查草稿裡每個數字</small></div></div>
+      <label class="step" style="cursor:pointer">${signed ? `<span class="c ok">${CHECK}</span>` : `<input type="checkbox" id="s2" onchange="supp[cur]=this.checked;check()" ${supp[cur] ? "checked" : ""}>`}
+        <div>已補充處置與主訴<small>沒有要補充也請勾選</small></div></label>
+      <div class="step"><span class="c ${signed ? "ok" : ""}" id="s3c">${signed ? CHECK : "3"}</span><div>簽核並寫入護理紀錄<small>${signed ? "" : "寫入後不能再修改"}</small></div></div>
+      ${signed ? `<div class="signed">${CHECK} 已簽核 · ${esc(signed.nurse)} · ${new Date(signed.signed_at).toLocaleString("zh-TW", {hour12: false})}</div>`
+        : `<div style="display:flex;flex-direction:column;gap:8px">
+            <button class="btn primary" id="sign" style="min-height:44px;font-size:15px" onclick="sign()">簽核並寫入</button>
+            <button class="btn" id="edit" onclick="toggleEdit()" ${running ? "disabled" : ""}>${editing ? "完成編輯" : "編輯草稿"}</button></div>`}
+    </section>
+    <section class="card"><h2>這份草稿怎麼來的</h2><div class="how">${how}</div>${llmNote}</section>
+    ${S.demo ? `<div class="hint">示範模式：簽核會寫入 results/nursing_records_demo.jsonl</div>` : ""}`;
+}
+
+function unmatched(){ const facts = new Set(draft.facts); return (($("headline") || {}).innerText || "").match(NUM_RE)?.filter(t => !facts.has(t)) || []; }
+function suppTyped(){ if ($("supp").value.trim() && !supp[cur]) { supp[cur] = true; $("s2").checked = true; } check(); }
+function check(){
+  if (!draft || !$("s1c")) return;
+  const signed = draft.signed;
+  const bad = signed ? (signed.fact_check || {unmatched: []}).unmatched : unmatched();
+  $("s1c").className = "c " + (bad.length ? "bad" : "ok"); $("s1c").innerHTML = bad.length ? "!" : CHECK;
+  $("s1t").textContent = bad.length ? "事實核對：有數字對不上" : "事實核對通過";
+  $("s1s").innerHTML = bad.length ? `<span class="bad-t">事件紀錄裡找不到：${esc(bad.join("、"))}</span>` : "每個時間、數字都對得回事件紀錄";
+  const s2 = signed || supp[cur];
+  const done = (bad.length ? 0 : 1) + (s2 ? 1 : 0) + (signed ? 1 : 0);
+  $("steps-n").textContent = `${done} / 3`; $("steps-bar").style.width = (done / 3 * 100) + "%";
+  if ($("sign")) { $("sign").disabled = !s2 || (draft.llm || {}).status === "running"; $("sign").title = s2 ? "" : "先完成第 2 項"; }
+}
+function toggleEdit(){
+  editing = !editing; const h = $("headline"); h.contentEditable = editing;
+  $("edit").textContent = editing ? "完成編輯" : "編輯草稿";
+  if (editing) { h.focus(); getSelection().selectAllChildren(h); getSelection().collapseToEnd(); }
+}
+async function regen(){
+  const r = await post("/api/records/regen", {session: cur});
+  if (!r.ok) { toast(r.error); return; }
+  editing = false; await loadDraft(cur); toast((draft.llm || {}).status === "running" ? "AI 重新起草中…" : "已依事件紀錄重新產生");
+}
+async function sign(){
+  const text = $("headline").innerText.trim(), bad = unmatched();
+  if (bad.length && !confirm(`草稿裡有 ${bad.length} 個數字對不上事件紀錄（${bad.join("、")}）。\n仍要簽核嗎？核對結果會一起寫進紀錄。`)) return;
+  const r = await post("/api/records/sign", {session: cur, text, actions: $("supp").value, nurse});
+  if (!r.ok) { toast(r.error || "簽核失敗"); return; }
+  editing = false; toast(`已簽核並寫入護理紀錄（${nurse}）`);
+  const next = recs.find(x => x.status === "pending" && x.session !== cur);
+  recTab = "pending";
+  await loadRecords(next ? next.session : cur);
+  refresh();
+}
+
+// ===================================================================
+// 報表與裝置
+// ===================================================================
+async function refreshReport(){
+  let R; try { R = await getJSON("/api/report"); } catch { return; }
+  const k = R.kpi, net = R.network;
+  $("rp-kpis").innerHTML = `
+    <div class="kpi"><div class="l">告警負擔</div><div class="v">${k.burden ?? "—"}<small>次 / 床·時</small></div><div class="s">${k.burden == null ? `累積滿 1 床·時才計算（目前 ${k.bed_hours}）` : `共 ${k.alerts} 次告警 · ${k.bed_hours} 床·時`}</div></div>
+    <div class="kpi"><div class="l">平均回應時間</div><div class="v">${k.resp_avg ?? "—"}${k.resp_avg != null ? "<small>秒</small>" : ""}</div><div class="s">${k.resp_n} 次告警已確認</div></div>
+    <div class="kpi"><div class="l">有效監測時間</div><div class="v">${k.coverage == null ? "—" : (k.coverage * 100).toFixed(1) + "<small>%</small>"}</div><div class="s">其餘為看不到或照護暫停</div></div>
+    <div class="kpi"><div class="l">觀察後未升級</div><div class="v">${k.quiet}</div><div class="s">只記錄，沒有打擾護理師</div></div>`;
+  $("rp-since").textContent = `統計區間：護理站啟動後 ${R.since_min} 分鐘`;
+  const disp = {alert: "告警", watching: "觀察中", unreliable: "無法判定", care: "照護中", baseline: "建立基準", offline: "離線", ended: "已結束", normal: "穩定"};
+  $("rp-rows").innerHTML = R.beds.length ? R.beds.map(b => `<tr>
+      <td style="font-weight:700">${esc(bedName(b.bed))}</td>
+      <td><span style="display:inline-flex;align-items:center;gap:6px"><i class="dot" style="background:${b.online ? "var(--ok)" : "#B8BFC8"}"></i>${b.online ? `在線 · ${b.age_s} 秒前` : (b.display === "ended" ? "已結束" : `離線 · ${mmss(b.age_s)} 前`)}</span>
+        <div class="hint">${esc(disp[b.display] || b.display)}</div></td>
+      <td>${dur(b.uptime)}</td>
+      <td style="${b.alerts + b.fast ? "font-weight:700;color:var(--alert-ink)" : ""}">${b.alerts}${b.fast ? ` <span class="hint">+ 快 ${b.fast}</span>` : ""}</td>
+      <td>${b.watch}</td><td>${b.unrel_min ? b.unrel_min + " 分" : "0"}</td>
+      <td>${b.coverage == null ? "—" : `<span class="covbar"><i style="width:${(b.coverage * 100).toFixed(0)}%"></i></span>${(b.coverage * 100).toFixed(1)}%`}</td>
+      <td>${num(b.visibility)}</td></tr>`).join("")
+    : `<tr><td colspan="8" class="empty">還沒有床邊主機連進來</td></tr>`;
+  const sample = R.sample_status ? JSON.stringify(R.sample_status) : null;
+  $("rp-net").innerHTML = `
+    <div style="display:flex;align-items:baseline;gap:10px"><span class="zero">0</span><span>路影像。只有事件文字與每 5 秒一次的心跳。</span></div>
+    <div class="row"><span>累計傳輸</span><b>${fmtBytes(net.bytes_total)}</b></div>
+    <div class="row"><span>平均每筆</span><b>${net.bytes_mean_per_message} bytes</b></div>
+    <div class="row"><span>目前流量</span><b>${(net.kbps || 0).toFixed(2)} kbps</b></div>
+    <div class="row"><span>對照：單路 1080p 影像</span><b>≈ 4,000 kbps</b></div>
+    ${sample ? `<div class="hint">最近一筆心跳原文（${new TextEncoder().encode(sample).length} bytes）：</div><pre>${esc(sample)}</pre>` : ""}`;
+  const L = R.llm;
+  $("rp-llm").innerHTML = L.enabled
+    ? `<div class="row" style="border:0;padding:0"><span>hailo-ollama</span><b>${esc(L.url)}</b></div>
+       <div class="row"><span>模型</span><b>${esc(L.model)}</b></div>
+       <div class="row"><span>採用 AI 草稿</span><b>${L.ok} 份</b></div>
+       <div class="row"><span>退回範本</span><b>${L.fallback} 份</b></div>
+       <div class="hint">退回原因會顯示在紀錄整理頁右側。</div>`
+    : `<div>未啟用。紀錄草稿目前用範本填空，功能完整。</div>
+       <div class="hint">要接 UGen300 上的 LLM：先啟動 hailo-ollama，再用<br><code>python scripts/nurse_station.py --llm http://localhost:8000</code><br>啟動護理站。步驟見 docs/USAGE.md。</div>`;
+}
+
+// ===================================================================
+route();
 refresh();
 setInterval(refresh, 2000);
 </script>

@@ -112,7 +112,7 @@ sink:
   # 事件輸出。★ 這一層讓「影像不出床邊」變成程式碼強制的規則
   bed_id: "Bed07"
   jsonl: results/events_{bed}.jsonl       # 本地紀錄，一行一事件
-  # http: http://nurse-station.local:8420/ingest   # 護理站收集器，可省略
+  http: http://localhost:8420/ingest   # 護理站收集器。護理站在別台電腦就把 localhost 換成那台的 IP；沒開護理站也不影響床邊
   status_interval_s: 5.0                  # 心跳間隔
 
 visualize:

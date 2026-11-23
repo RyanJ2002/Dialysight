@@ -218,6 +218,7 @@ class HTTPSink(EventSink):
         self._failed = 0
         self._dropped = 0
         self._bytes = 0
+        self._healthy = True                  # 最近一次送出是否成功
 
         self._worker = threading.Thread(target=self._run, daemon=True)
         self._worker.start()
@@ -253,8 +254,10 @@ class HTTPSink(EventSink):
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout):
                     self._sent += 1
+                    self._healthy = True
             except (urllib.error.URLError, OSError, TimeoutError):
                 self._failed += 1
+                self._healthy = False
                 try:
                     self._q.put_nowait(payload)      # 放回去重試
                 except queue.Full:
@@ -262,6 +265,11 @@ class HTTPSink(EventSink):
                 self._stop.wait(self.retry_interval)
 
     def close(self) -> None:
+        # ★ 先把佇列送完再停 —— 最後一筆通常是 session_end，
+        #   沒送到護理站就不知道這床治療結束了。護理站連不上時不等，免得拖住結束。
+        deadline = time.monotonic() + self.timeout + 1.0
+        while self._healthy and not self._q.empty() and time.monotonic() < deadline:
+            time.sleep(0.05)
         self._stop.set()
         self._worker.join(timeout=3.0)
 
