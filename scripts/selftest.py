@@ -651,6 +651,69 @@ def test_records() -> bool:
 
 # --------------------------------------------------------------------------
 
+def test_cause() -> bool:
+    section("13. 不可信的原因分類 —— 說得出「為什麼看不到」")
+    import numpy as np
+
+    from src.temporal import cause as K
+
+    def c(n_det, n_pass, luma=None, found=None):
+        m = {"n_detected": n_det, "n_passed": n_pass}
+        if found is not None:
+            m["subject_found"] = found
+        return K.classify(m, luma)
+
+    record("沒有人 → 離床", c(0, 0) == K.NO_PERSON, K.label(c(0, 0)))
+    record("有人但沒人符合病人判別", c(1, 0) == K.PERSON_NOT_PATIENT,
+           K.label(c(1, 0)))
+    record("一人・光線足 → 歸入未分類遮蔽", c(1, 1, 180.0) == K.OCCLUDED,
+           K.label(c(1, 1, 180.0)))
+    record("一人・太暗 → 光線不足", c(1, 1, 12.0) == K.LOW_LIGHT,
+           K.label(c(1, 1, 12.0)))
+    record("兩人・光線足 → 他人遮擋", c(2, 1, 180.0) == K.OTHER_PERSON,
+           K.label(c(2, 1, 180.0)))
+
+    # ★ metadata 不足時不要猜 —— 沒有資料不等於沒有人
+    record("meta 缺欄位 → 原因未知 ★",
+           K.classify({}) == K.UNKNOWN
+           and K.classify(None) == K.UNKNOWN
+           and K.classify({"n_detected": 1}) == K.UNKNOWN,
+           "舊的 keypoint dump 或 subject 判別沒開時走這條")
+
+    # ★ 優先序是刻意的，不是巧合
+    record("太暗勝過他人遮擋 ★", c(2, 1, 12.0) == K.LOW_LIGHT,
+           f"兩人且太暗 → {K.label(c(2, 1, 12.0))}（暗會解釋關鍵點為何不穩）")
+    record("沒有人勝過太暗 ★", c(0, 0, 12.0) == K.NO_PERSON,
+           f"沒人且太暗 → {K.label(c(0, 0, 12.0))}")
+
+    # ★ 只吃類別化的人數：兩個後端的 NMS 不同，精確人數可能差一個
+    same = {c(n, 1, 180.0) for n in (2, 3, 5)}
+    record("人數只分 0/1/≥2 ★", len(same) == 1,
+           f"2、3、5 人都給 {K.label(c(3, 1, 180.0))} —— 對後端差異免疫")
+
+    # subject_found 明確給 False 時要蓋過 n_passed
+    record("subject_found=False 優先", c(2, 1, 180.0, found=False)
+           == K.PERSON_NOT_PATIENT, "明確說沒選到就是沒選到")
+
+    img = np.zeros((480, 640, 3), np.uint8)
+    img[:] = 100
+    img[0:240] = 20
+    lum = K.frame_luma(img)
+    record("亮度取樣正確", abs(lum - 60.0) < 1e-6,
+           f"一半 20 一半 100 → {lum:.1f}")
+    record("沒有影格時回 None", K.frame_luma(None) is None, "不要假造亮度")
+
+    h = K.histogram([K.OCCLUDED, K.NO_PERSON, K.OCCLUDED, "", K.OCCLUDED, None])
+    record("直方圖依數量排序並忽略空值",
+           list(h) == [K.OCCLUDED, K.NO_PERSON] and h[K.OCCLUDED] == 3, str(h))
+    record("未知代碼不被吞掉", K.label("something_new") == "something_new",
+           "標籤表查不到就原樣回傳")
+
+    return all(m == PASS for m, _, _ in results[-13:])
+
+
+# --------------------------------------------------------------------------
+
 def main() -> None:
     print("=" * 62)
     print("  DialySight 自我測試 — 不需要影片，不需要硬體")
@@ -660,7 +723,7 @@ def main() -> None:
     checks = [test_imports, test_window, test_state_machine,
               test_fast_channel, test_fusion, test_subject,
               test_color, test_sink, test_pipeline_end_to_end,
-              test_render, test_report, test_records]
+              test_render, test_report, test_records, test_cause]
     all_ok = True
     for fn in checks:
         try:
