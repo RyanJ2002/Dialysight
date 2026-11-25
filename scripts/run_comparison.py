@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from itertools import zip_longest
 from pathlib import Path
 
@@ -19,13 +20,18 @@ from src.visualize import (ComparisonRenderer, DemoRenderer, LayoutConfig,
                            PreviewWindow)
 
 
-def probe_fps(video: str) -> float:
+def probe_video(video: str) -> tuple[float, int]:
     cap = cv2.VideoCapture(video)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {video}")
     fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     cap.release()
-    return float(fps) if 1.0 <= fps <= 240.0 else 30.0
+    return (float(fps) if 1.0 <= fps <= 240.0 else 30.0), total
+
+
+def probe_fps(video: str) -> float:
+    return probe_video(video)[0]
 
 
 def renderer_for(cfg: dict) -> DemoRenderer:
@@ -50,6 +56,12 @@ def main() -> None:
     parser.add_argument("--ours-config", default="config/default.yaml")
     parser.add_argument("--out", help="Output MP4 path")
     parser.add_argument("--show", action="store_true")
+    parser.add_argument("--keypoints", help=(
+        "Replay both pipelines from one keypoint dump "
+        "(scripts/dump_keypoints.py). Strongly preferred: without it this "
+        "script runs pose inference twice over the clip, which is slow and "
+        "lets the two sides see different keypoints -- the comparison is "
+        "about the temporal layer, so both sides must get identical input."))
     args = parser.parse_args()
     if not args.out and not args.show:
         parser.error("Use --out, --show, or both")
@@ -58,13 +70,30 @@ def main() -> None:
         Path(args.baseline_config).read_text(encoding="utf-8"))
     ours_cfg = yaml.safe_load(
         Path(args.ours_config).read_text(encoding="utf-8"))
-    fps = probe_fps(args.video)
+
+    if args.keypoints:
+        if not Path(args.keypoints).is_file():
+            raise SystemExit(f"Keypoint dump not found: {args.keypoints}")
+        for cfg in (baseline_cfg, ours_cfg):
+            cfg["inference"] = {"backend": "replay",
+                                "keypoints_json": args.keypoints}
+        print(f"Replaying both sides from {args.keypoints}", flush=True)
+
+    fps, total = probe_video(args.video)
+    if args.keypoints:
+        try:
+            total = len(json.loads(
+                Path(args.keypoints).read_text(encoding="utf-8"))["frames"])
+        except Exception:
+            pass
     baseline = Pipeline(baseline_cfg, use_baseline_machine=True,
                         enable_sink=False, fps_hint=fps)
     ours = Pipeline(ours_cfg, use_baseline_machine=False,
                     enable_sink=False, fps_hint=fps)
     comparison = ComparisonRenderer(renderer_for(baseline_cfg),
                                     renderer_for(ours_cfg))
+    print(f"Output {comparison.width}x{comparison.height} @ {fps:.2f} fps",
+          flush=True)
     preview = (PreviewWindow("DialySight comparison",
                              comparison.width, comparison.height)
                if args.show else None)
@@ -78,6 +107,12 @@ def main() -> None:
             baseline.close()
             ours.close()
             raise RuntimeError(f"Cannot write video: {out}")
+
+    # Rendering two panels per frame runs at roughly 30 fps, so a five-minute
+    # clip takes several minutes with nothing to look at. Print progress:
+    # silence is indistinguishable from a hang, and was read as one.
+    t0 = time.monotonic()
+    done = 0
 
     try:
         for base_result, ours_result in zip_longest(
@@ -95,19 +130,50 @@ def main() -> None:
                 preview.show(frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
+
+            done += 1
+            if done % 100 == 0:
+                rate = done / max(1e-6, time.monotonic() - t0)
+                eta = ((total - done) / rate) if total and rate else 0.0
+                bar = f" ({done * 100 // total}%)" if total else ""
+                print(f"  {done}{bar}  {rate:.1f} fps"
+                      + (f"  ETA {int(eta // 60)}m{int(eta % 60):02d}s"
+                         if eta > 0 else ""),
+                      flush=True)
         base_summary = baseline.summary()
         ours_summary = ours.summary()
-        print(json.dumps({
+        from_summary = {
             "baseline_alerts": base_summary["alerts"],
             "ours_alerts": ours_summary["alerts"],
             "ours_alerts_slow": ours_summary["alerts_slow"],
             "ours_alerts_fast": ours_summary["alerts_fast"],
-        }, indent=2))
+        }
+        print(json.dumps(from_summary, indent=2))
+
+        # The counters burnt into the video and the pipeline summaries are
+        # computed independently, so a mismatch means the video shows numbers
+        # the experiment does not support. Catch that here, not in review.
+        on_screen = {"baseline_alerts": comparison.baseline_alerts,
+                     "ours_alerts": comparison.ours_alerts,
+                     "ours_alerts_slow": ours_summary["alerts_slow"],
+                     "ours_alerts_fast": ours_summary["alerts_fast"]}
+        if on_screen != from_summary:
+            print("\nWARNING: on-screen counters disagree with the pipeline "
+                  "summaries -- do not use this video.")
+            print(f"  on screen: {on_screen}")
+            print(f"  summaries: {from_summary}")
+        else:
+            reduction = (100.0 * (from_summary["baseline_alerts"]
+                                  - from_summary["ours_alerts"])
+                         / from_summary["baseline_alerts"]
+                         if from_summary["baseline_alerts"] else 0.0)
+            print(f"\nOn-screen counters match the summaries. "
+                  f"Reduction {reduction:.1f}%.")
     finally:
         if writer is not None:
             writer.release()
-        if args.show:
-            cv2.destroyAllWindows()
+        if preview is not None:
+            preview.close()
         baseline.close()
         ours.close()
 

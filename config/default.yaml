@@ -4,11 +4,15 @@
 # 對照實驗就是跑兩份不同的 config。
 
 inference:
-  backend: ultralytics      # ultralytics | replay | hailo（10/26 後）
+  backend: ultralytics      # ultralytics | replay | hailo
   model: yolov8s-pose.pt
   device: cpu               # cpu | cuda | mps
   imgsz: 640
   conf: 0.25
+  iou: 0.7                  # NMS 門檻。hailo 後端自己做 NMS 時用
+  # backend: hailo 時使用。HEF 不進 git（見 .gitignore），要自己下載：
+  #   https://hailo-model-zoo.s3.eu-west-2.amazonaws.com/ModelZoo/Compiled/v5.5.0/hailo10h/yolov8s_pose.hef
+  hef: models/yolov8s_pose.hef
   # backend: replay 時使用
   # keypoints_json: data/clips/clip_03.json
 
