@@ -56,7 +56,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.station.records import (HEARTBEAT_S, LLMClient, build_draft,  # noqa: E402
-                                 fact_check, list_item, llm_rewrite, session_window)
+                                 check_claims, fact_check, list_item,
+                                 llm_rewrite, session_window)
 
 PAGE = ROOT / "src" / "station" / "dashboard.html"
 
@@ -604,6 +605,9 @@ class Store:
         if draft is None:
             return {"ok": False, "error": "找不到這個床次"}
         unmatched = fact_check(text, draft["facts"])
+        # 護理師編輯過的文字也比一次關鍵主張 —— 打錯的次數不會只靠存在性檢查擋。
+        # 兩者都只是記錄，不阻擋簽核：簽名的人才是最後的權威。
+        wrong_claims = check_claims(text, draft.get("claims"))
         with self.lock:
             rec = {
                 "type": "nursing_record", "session": sid, "bed": draft["bed"],
@@ -611,7 +615,9 @@ class Store:
                 "nurse": nurse, "summary": text,
                 "actions": actions, "complaint": complaint,
                 "events": [it["ref"] for it in draft["items"] if it["ref"].startswith("#")],
-                "fact_check": {"ok": not unmatched, "unmatched": unmatched},
+                "fact_check": {"ok": not unmatched and not wrong_claims,
+                               "unmatched": unmatched,
+                               "wrong_claims": wrong_claims},
                 "generated_by": draft["meta"]["method"],
             }
             self.signed[sid] = rec

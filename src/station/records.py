@@ -58,6 +58,45 @@ def fact_check(text: str, facts: set[str] | list[str]) -> list[str]:
     return [tok for tok in numbers_in(text) if tok not in allowed]
 
 
+# ★ fact_check 只檢查「這個數字在事實集合裡存在嗎」，不檢查「它被用在對的地方嗎」。
+#
+#   所以合法的數字可以被用在錯的位置而不被發現：
+#     事實集合因為「約 3 分鐘無法判定」而含有 "3"
+#     → 模型寫「告警 3 次」（實際 5 次）→ 每個 token 都在集合裡 → 通過
+#
+#   下面針對最有後果的幾個主張再比一次「數值對不對」。
+#   這是**額外**的一層，不是完整的語意剖析 —— 它只認得列出來的句型，
+#   認不出的句型仍然只有 fact_check 擋著，最後由護理師簽核把關。
+CLAIM_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("alerts",     re.compile(r"告警\s*(?:共\s*)?(\d+)\s*次")),
+    ("alerts",     re.compile(r"(\d+)\s*次\s*告警")),
+    ("slow",       re.compile(r"漸進(?:性)?\s*(\d+)")),
+    ("fast",       re.compile(r"突發\s*(\d+)")),
+    ("dismissed",  re.compile(r"觀察\s*(\d+)\s*次")),
+    ("unrel_min",  re.compile(r"(\d+)\s*分鐘?\s*(?:無法判定|看不到)")),
+    ("unrel_min",  re.compile(r"無法判定[^\d]{0,6}(\d+)\s*分")),
+]
+
+CLAIM_LABEL = {"alerts": "告警次數", "slow": "漸進次數", "fast": "突發次數",
+               "dismissed": "觀察次數", "unrel_min": "無法判定分鐘數"}
+
+
+def check_claims(text: str, claims: Optional[dict]) -> list[str]:
+    """回傳與事件紀錄矛盾的主張描述。空串列 = 沒抓到矛盾。"""
+    if not claims:
+        return []
+    bad = []
+    for key, pat in CLAIM_PATTERNS:
+        if key not in claims:
+            continue
+        for m in pat.finditer(text or ""):
+            said = int(m.group(1))
+            if said != int(claims[key]):
+                bad.append(f"{CLAIM_LABEL.get(key, key)}寫 {said}，"
+                           f"實際 {claims[key]}")
+    return sorted(set(bad))
+
+
 def _hm(epoch: float) -> str:
     return datetime.fromtimestamp(epoch).strftime("%H:%M")
 
@@ -264,6 +303,9 @@ def build_draft(sid: str, s: dict, history: list[dict],
         "history": bars, "history_text": history_text,
         "stats": [{"label": a, "value": b} for a, b in stats],
         "facts": sorted(facts),
+        # 事實集合管「這個數字存在嗎」，claims 管「這個數字用對了嗎」。見 check_claims。
+        "claims": {"alerts": len(events), "slow": n_slow, "fast": n_fast,
+                   "dismissed": dismissed, "unrel_min": unrel_min},
         "signed": signed,
         "meta": {"method": "範本填空", "inputs": len(events)
                  + len(s.get("watch_eps", [])) + len(s.get("unrel_eps", [])),
@@ -387,8 +429,12 @@ def llm_prompt(draft: dict) -> str:
     return "\n".join(lines)
 
 
-def check_llm_text(text: str, facts) -> Optional[str]:
-    """LLM 輸出能不能用。可以用回傳 None，不行回傳原因（會顯示在紀錄整理頁）。"""
+def check_llm_text(text: str, facts, claims: Optional[dict] = None) -> Optional[str]:
+    """LLM 輸出能不能用。可以用回傳 None，不行回傳原因（會顯示在紀錄整理頁）。
+
+    claims 省略時只做 fact_check 的存在性檢查（舊行為）；
+    帶進來時會再比一次關鍵主張的數值，見 check_claims。
+    """
     if not text:
         return "模型沒有回應內容"
     if len(text) > LLM_MAX_CHARS:
@@ -396,6 +442,9 @@ def check_llm_text(text: str, facts) -> Optional[str]:
     bad = fact_check(text, facts)
     if bad:
         return "數字對不上事件紀錄：" + "、".join(bad)
+    wrong = check_claims(text, claims)
+    if wrong:
+        return "數字用錯位置：" + "；".join(wrong)
     if _CN_NUMBER.search(text):
         return "用了中文數字，無法逐一核對"
     hit = next((w for w in _ADVICE if w in text), None)
@@ -425,7 +474,7 @@ def llm_rewrite(draft: dict, client: LLMClient) -> dict:
     except (RuntimeError, ValueError, KeyError) as e:
         return {"status": "fallback", "model": model, "ms": ms(), "reason": str(e)}
     text = " ".join(_THINK.sub("", text).split()).strip(_QUOTES)
-    reason = check_llm_text(text, draft["facts"])
+    reason = check_llm_text(text, draft["facts"], draft.get("claims"))
     if reason:
         return {"status": "fallback", "model": model, "ms": ms(), "reason": reason,
                 "raw": text}

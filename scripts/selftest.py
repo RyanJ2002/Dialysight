@@ -580,6 +580,77 @@ def test_report() -> bool:
 
 # --------------------------------------------------------------------------
 
+def test_records() -> bool:
+    section("12. 紀錄草稿的數字核對 ★ 幻覺與簽名之間的那道牆")
+    from src.station import records as R
+
+    # 合成一個床次：4 小時、3 筆漸進 + 2 筆突發、觀察 2 次、無法判定 3 分鐘。
+    # unreliable_n 乘上心跳間隔要剛好等於 3 分鐘，unrel_min 才會是 3。
+    start, dur = 1_700_000_000.0, 14400.0
+    ev = []
+    for i, (ch, off, peak) in enumerate([
+            ("slow", 1200.0, 0.21), ("slow", 4800.0, 0.26), ("slow", 9000.0, 0.31),
+            ("fast", 2400.0, 0.44), ("fast", 7200.0, 0.52)]):
+        ev.append({"channel": ch, "feature": "arm_displacement", "peak": peak,
+                   "duration": 21.0 if ch == "slow" else None,
+                   "eid": i + 1, "t_offset": off})
+    s = {
+        "bed": "Bed07", "first": start, "last": start + dur,
+        "events": ev,
+        "end": {"duration": dur, "dismissed": 2},
+        "watch_eps": [], "unrel_eps": [],
+        "unreliable_n": int(3 * 60 / R.HEARTBEAT_S),      # → 3 分鐘
+        "status_n": 2880, "pauses": 0,
+    }
+    d = R.build_draft("s1", s, [])
+    claims, facts = d["claims"], d["facts"]
+
+    record("草稿的 claims 正確", claims == {"alerts": 5, "slow": 3, "fast": 2,
+                                           "dismissed": 2, "unrel_min": 3},
+           str(claims))
+
+    # ★ 自我一致性：範本自己寫出來的數字，必須通得過自己的核對。
+    #   範本若吐出一個沒登記成事實的數字，LLM 的改寫會被冤枉退回。
+    own = R.fact_check(d["headline"], facts)
+    record("範本自己通過自己的核對 ★", not own,
+           "全部對得上" if not own else f"漏登記：{own}")
+
+    def verdict(text: str):
+        return R.check_llm_text(text, facts, claims)
+
+    clean = "本次治療告警 5 次，其中漸進 3、突發 2；約 3 分鐘無法判定。"
+    record("通順的改寫可以採用", verdict(clean) is None, verdict(clean) or "通過")
+
+    # ★ 這一條就是 fact_check 原本的漏洞：
+    #   事實集合因為「3 分鐘無法判定」而含有 "3"，所以「告警 3 次」
+    #   每個 token 都找得到 —— 存在性檢查會放它過去。
+    hole = "本次治療告警 3 次，其中漸進 3、突發 2；約 3 分鐘無法判定。"
+    record("舊檢查放過借用的數字", not R.fact_check(hole, facts),
+           "每個 token 都在事實集合裡")
+    record("主張檢查抓到數字用錯位置 ★", verdict(hole) is not None,
+           verdict(hole) or "沒抓到")
+
+    cases = [
+        ("編出來的數字被擋下", "告警 5 次，最大偏離 0.97。"),
+        ("中文數字被擋下", "本次治療告警五次。"),
+        ("臨床建議被擋下", "告警 5 次，建議加強巡視。"),
+        ("過長被擋下", "告警 5 次。" + "治療過程平穩。" * 30),
+    ]
+    for name, text in cases:
+        record(name, verdict(text) is not None, verdict(text) or "沒擋下")
+
+    # ★ 送進模型的只有事件文字 —— 這是 UI 上那句「沒有影像、沒有座標」的程式保證
+    prompt = R.llm_prompt(d)
+    leaked = [w for w in ("keypoint", "座標", "x=", "frame", "jpg", "base64")
+              if w in prompt.lower() or w in prompt]
+    record("prompt 不含影像或座標 ★", not leaked,
+           f"{len(prompt)} 字" if not leaked else f"外洩：{leaked}")
+
+    return all(m == PASS for m, _, _ in results[-11:])
+
+
+# --------------------------------------------------------------------------
+
 def main() -> None:
     print("=" * 62)
     print("  DialySight 自我測試 — 不需要影片，不需要硬體")
@@ -589,7 +660,7 @@ def main() -> None:
     checks = [test_imports, test_window, test_state_machine,
               test_fast_channel, test_fusion, test_subject,
               test_color, test_sink, test_pipeline_end_to_end,
-              test_render, test_report]
+              test_render, test_report, test_records]
     all_ok = True
     for fn in checks:
         try:
